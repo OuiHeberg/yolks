@@ -1,0 +1,17 @@
+# Propose une PR quand une nouvelle version corrective de Node sort (22.x, 24.x, 26.x), jamais un changement de ligne.
+version: 2
+updates:
+  - package-ecosystem: docker
+    directories:
+      - /nodejs/22
+      - /nodejs/24
+      - /nodejs/26
+    schedule:
+      interval: daily
+    ignore:
+      - dependency-name: node
+        update-types: ["version-update:semver-major"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
