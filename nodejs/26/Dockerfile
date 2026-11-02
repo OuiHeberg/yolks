@@ -1,4 +1,4 @@
-FROM        --platform=$TARGETOS/$TARGETARCH node:26.12.1-trixie-slim
+FROM        --platform=$TARGETOS/$TARGETARCH node:26.13.0-trixie-slim
 
 LABEL       author="Michael Parker" maintainer="OuiHeberg <contact@ouiheberg.com>" \
             org.opencontainers.image.source="https://github.com/OuiHeberg/yolks" \
