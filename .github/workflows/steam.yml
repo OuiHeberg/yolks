@@ -1,0 +1,138 @@
+# Images Steam des serveurs OuiPanel :
+#  - ghcr.io/ouiheberg/yolks:steam-installer : conteneur d'installation commun des
+#    eggs qui déclarent une installation Steam (oh-steam-install, DepotDownloader,
+#    SteamCMD, steamclient.so) ;
+#  - ghcr.io/ouiheberg/yolks:dayz : image d'exécution de l'egg DayZ 13944.
+# Sources : OuiHeberg/OuiPanelV2-2023, deploy/steam-installer et deploy/runtime-dayz
+# (PR #961), recopiées ici à l'identique.
+#
+# Sur une pull request : banc, construction et contrôles sans réseau, RIEN n'est publié.
+# Sur main (push, lundi 03:30 UTC, à la main) : les mêmes contrôles, puis publication
+# du tag courant et d'un tag daté (retour arrière), puis tirage SANS identifiant.
+name: build steam
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "30 3 * * 1"   # chaque lundi 03:30 UTC : mises à jour Debian de la base
+  pull_request:
+    paths:
+      - steam-installer/**
+      - games/dayz/**
+      - .github/workflows/steam.yml
+  push:
+    branches:
+      - main
+    paths:
+      - steam-installer/**
+      - games/dayz/**
+      - .github/workflows/steam.yml
+permissions:
+  contents: read
+
+jobs:
+  steam-installer:
+    name: "yolks:steam-installer"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/ouiheberg/yolks
+    steps:
+      - uses: actions/checkout@v7
+      - name: Banc de oh-steam-install (doublures, sans réseau ni compte Steam)
+        run: bash steam-installer/tests/oh-steam-install.test.sh
+      - id: t
+        name: Tag daté
+        run: echo "dated=steam-installer-$(date -u +%Y%m%d)-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        with:
+          context: ./steam-installer
+          platforms: linux/amd64
+          pull: true
+          load: true
+          push: false
+          tags: |
+            ${{ env.IMAGE }}:steam-installer
+            ${{ env.IMAGE }}:${{ steps.t.outputs.dated }}
+      - name: Contrôle sans réseau (oh-steam-selftest)
+        run: docker run --rm --network none "$IMAGE:steam-installer" oh-steam-selftest
+      - name: Contrôle du contrôle (sans jeton, le selftest doit échouer)
+        run: |
+          docker run --rm --network none --entrypoint bash "$IMAGE:steam-installer" -c \
+            'sed "s/^FIXTURE=.*/FIXTURE=\"\"/" /usr/local/bin/oh-steam-selftest > /tmp/neg && ! bash /tmp/neg'
+      - if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - if: github.event_name != 'pull_request'
+        name: Publication
+        run: |
+          docker push "$IMAGE:steam-installer"
+          docker push "$IMAGE:${{ steps.t.outputs.dated }}"
+      - if: github.event_name != 'pull_request'
+        name: Tirage sans identifiant (paquet public) et selftest de l'image publiée
+        run: |
+          docker logout ghcr.io
+          docker image rm "$IMAGE:steam-installer" "$IMAGE:${{ steps.t.outputs.dated }}"
+          docker pull "$IMAGE:steam-installer"
+          docker run --rm --network none "$IMAGE:steam-installer" oh-steam-selftest
+
+  dayz:
+    name: "yolks:dayz"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/ouiheberg/yolks
+    steps:
+      - uses: actions/checkout@v7
+      - id: t
+        name: Tag daté
+        run: echo "dated=dayz-$(date -u +%Y%m%d)-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        with:
+          context: ./games/dayz
+          platforms: linux/amd64
+          pull: true
+          load: true
+          push: false
+          tags: |
+            ${{ env.IMAGE }}:dayz
+            ${{ env.IMAGE }}:${{ steps.t.outputs.dated }}
+      - name: Contrôle sans réseau de l'image
+        run: |
+          docker run --rm --network none --entrypoint bash "$IMAGE:dayz" -c '
+            set -e
+            bash -n /entrypoint.sh
+            test -x /entrypoint.sh
+            test -x /usr/bin/tini
+            test -f /usr/lib/x86_64-linux-gnu/libnss_wrapper.so
+            test -f /passwd.template
+            command -v envsubst
+            [ "$(id -un)" = container ]
+            [ "$HOME" = /home/container ]
+            [ "$(pwd)" = /home/container ]
+            echo "OK : image dayz"'
+      - if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - if: github.event_name != 'pull_request'
+        name: Publication
+        run: |
+          docker push "$IMAGE:dayz"
+          docker push "$IMAGE:${{ steps.t.outputs.dated }}"
+      - if: github.event_name != 'pull_request'
+        name: Tirage sans identifiant (paquet public)
+        run: |
+          docker logout ghcr.io
+          docker image rm "$IMAGE:dayz" "$IMAGE:${{ steps.t.outputs.dated }}"
+          docker pull "$IMAGE:dayz"
