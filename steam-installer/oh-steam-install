@@ -532,12 +532,14 @@ oh_main() {
     if [ "$ticket" = "unavailable" ]; then
         # Le panel a voulu émettre un ticket et n'a pas pu (ServerInstallController).
         oh_fail "Le panel n'a pas pu préparer la connexion Steam de cette installation : rien n'a été téléchargé. Relancez l'installation ; si cela se reproduit, contactez le support."
+        oh_fail "The panel could not prepare the Steam connection for this installation: nothing was downloaded. Start the installation again; if it happens again, contact support."
         return 4
     fi
     if oh_valid_ticket "$ticket" && ! oh_valid_ticket_url "$url"; then
         # Un ticket a été émis mais l'adresse du panel est mal réglée
         # (STEAM_TICKET_URL ou APP_URL avec un chemin, ou sans https).
         oh_fail "Adresse du panel invalide pour la connexion Steam (attendu https://hôte/api/hooks/steam/ticket) : rien n'a été téléchargé. Contactez le support."
+        oh_fail "Invalid panel address for the Steam connection (expected https://host/api/hooks/steam/ticket): nothing was downloaded. Contact support."
         return 4
     fi
     if ! oh_valid_ticket "$ticket"; then
@@ -570,7 +572,11 @@ oh_main() {
     # (-execdir : pas de course sur les dossiers parents).
     find "$server" -xdev \( ! -uid "$uid" -o ! -gid "$gid" \) -execdir chown -h "$uid:$gid" -- {} + 2> /dev/null
 
-    work="$(mktemp -d /tmp/oh-steam.XXXXXXXX)" || return 1
+    if ! work="$(mktemp -d /tmp/oh-steam.XXXXXXXX)"; then
+        oh_fail "Impossible de créer un dossier temporaire (/tmp plein ou en lecture seule ?) : rien n'a été téléchargé. Réessayez ; si cela se reproduit, contactez le support."
+        oh_fail "Could not create a temporary folder (/tmp full or read-only?): nothing was downloaded. Try again; if it happens again, contact support."
+        return 1
+    fi
     chmod 700 "$work" && chown "$uid:$gid" "$work" || { rm -rf -- "$work"; return 1; }
     ( umask 077; printf '%s' "$ticket" > "$work/ticket" ) && chown "$uid:$gid" "$work/ticket" && chmod 600 "$work/ticket"
     ticket=""

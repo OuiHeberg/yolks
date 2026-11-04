@@ -248,9 +248,12 @@ check "scénario 14 bis : crochet sans oh_hook = échec" '[ "$STATUS" -ne 0 ] &&
 
 # --- scénario 15 : ticket émis mais adresse du panel mal réglée : rend 3, et le dit
 OUT="$(env -i PATH="$ROOT/bin:/usr/bin:/bin" OH_TICKET="$TICKET" OH_TICKET_URL="https://panel.test/sous-dossier/api/hooks/steam/ticket" bash "$INSTALLER" 2>&1)"; STATUS=$?
-check "scénario 15 : adresse avec un chemin = code 4 et message" '[ "$STATUS" -eq 4 ] && grep -q "Adresse du panel invalide" <<< "$OUT" && grep -q "rien n'\''a été téléchargé" <<< "$OUT"'
+check "scénario 15 : adresse avec un chemin = code 4 et message (FR et EN)" '[ "$STATUS" -eq 4 ] && grep -q "Adresse du panel invalide" <<< "$OUT" && grep -q "Invalid panel address" <<< "$OUT" && grep -q "rien n'\''a été téléchargé" <<< "$OUT"'
+mkdir -p "$ROOT/s15m"; printf '#!/bin/bash\n[ "$1" = "-d" ] && exit 1\nexec /usr/bin/mktemp "$@"\n' > "$ROOT/s15m/mktemp"; chmod +x "$ROOT/s15m/mktemp"
+OUT="$(env -i PATH="$ROOT/s15m:$ROOT/bin:/usr/bin:/bin" OH_TICKET="$TICKET" OH_TICKET_URL="https://panel.test/api/hooks/steam/ticket" OH_SERVER_DIR="$ROOT" bash "$INSTALLER" 2>&1)"; STATUS=$?
+check "scénario 15 quater : mktemp -d en échec = code 1, message FR et EN" '[ "$STATUS" -eq 1 ] && grep -q "Impossible de créer un dossier temporaire" <<< "$OUT" && grep -q "Could not create a temporary folder" <<< "$OUT"'
 OUT="$(env -i PATH="$ROOT/bin:/usr/bin:/bin" OH_TICKET="unavailable" OH_TICKET_URL="https://panel.test/api/hooks/steam/ticket" bash "$INSTALLER" 2>&1)"; STATUS=$?
-check "scénario 15 ter : ticket non émis par le panel = code 4, message juste" '[ "$STATUS" -eq 4 ] && grep -q "n'\''a pas pu préparer la connexion Steam" <<< "$OUT" && ! grep -qi "aucun compte" <<< "$OUT"'
+check "scénario 15 ter : ticket non émis par le panel = code 4, message juste (FR et EN)" '[ "$STATUS" -eq 4 ] && grep -q "n'\''a pas pu préparer la connexion Steam" <<< "$OUT" && grep -q "could not prepare the Steam connection" <<< "$OUT" && ! grep -qi "aucun compte" <<< "$OUT"'
 OUT="$(env -i PATH="$ROOT/bin:/usr/bin:/bin" OH_TICKET="" OH_TICKET_URL="https://panel.test/api/hooks/steam/ticket" bash "$INSTALLER" 2>&1)"; STATUS=$?
 check "scénario 15 bis : sans ticket = code 3, en silence" '[ "$STATUS" -eq 3 ] && [ -z "$OUT" ]'
 
