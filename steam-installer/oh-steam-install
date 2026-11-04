@@ -461,18 +461,28 @@ oh_worker() {
     # 3. Plus besoin du jeton : il disparaît AVANT le crochet de l'egg.
     oh_wipe_token
 
-    # 4. Le crochet de l'egg (rangement à la façon du jeu).
-    if [ "$status" -eq 0 ] && [ -n "${OH_HOOK:-}" ] && [ -f "$OH_HOOK" ]; then
-        (
-            export OH_INSTALL_DIR="$install" OH_WORKSHOP_APP OH_LOGIN
-            export OH_WORKSHOP_DIR="$install/steamapps/workshop/content/${OH_WORKSHOP_APP:-0}"
-            export OH_WORKSHOP_LIST="$OH_WORK_DIR/workshop.tsv" OH_ITEM_RESULTS="$OH_WORK_DIR/item-results.tsv"
-            cd "$install" || exit 1
-            # shellcheck disable=SC1090
-            source "$OH_HOOK" || exit 1
-            declare -F oh_hook > /dev/null || exit 0
-            oh_hook
-        ) || { status=1; oh_fail "La préparation du serveur (crochet de l'egg) a échoué."; }
+    # 4. Le crochet de l'egg (rangement à la façon du jeu). Un crochet annoncé
+    # mais absent, ou sans fonction oh_hook, est un ÉCHEC : sinon le serveur
+    # serait déclaré installé sans avoir été préparé.
+    if [ "$status" -eq 0 ] && [ -n "${OH_HOOK:-}" ]; then
+        if [ ! -f "$OH_HOOK" ]; then
+            status=1
+            oh_fail "Le crochet de l'egg est introuvable : le serveur n'a pas été préparé."
+        else
+            (
+                export OH_INSTALL_DIR="$install" OH_WORKSHOP_APP OH_LOGIN
+                export OH_WORKSHOP_DIR="$install/steamapps/workshop/content/${OH_WORKSHOP_APP:-0}"
+                export OH_WORKSHOP_LIST="$OH_WORK_DIR/workshop.tsv" OH_ITEM_RESULTS="$OH_WORK_DIR/item-results.tsv"
+                cd "$install" || exit 1
+                # shellcheck disable=SC1090
+                source "$OH_HOOK" || exit 1
+                if ! declare -F oh_hook > /dev/null; then
+                    oh_fail "Le crochet de l'egg ne définit pas oh_hook."
+                    exit 1
+                fi
+                oh_hook
+            ) || { status=1; oh_fail "La préparation du serveur (crochet de l'egg) a échoué."; }
+        fi
     fi
 
     # 5. Le compte rendu : le résultat du crochet, sinon celui du téléchargement.
@@ -516,7 +526,14 @@ oh_main() {
     # Le ticket : lu ici, puis retiré de l'environnement.
     local ticket="${OH_TICKET:-}" url="${OH_TICKET_URL:-}"
     unset OH_TICKET OH_TICKET_URL
-    if ! oh_valid_ticket "$ticket" || ! oh_valid_ticket_url "$url"; then
+    if oh_valid_ticket "$ticket" && ! oh_valid_ticket_url "$url"; then
+        # Un ticket a été émis mais l'adresse du panel est mal réglée
+        # (STEAM_TICKET_URL ou APP_URL avec un chemin, ou sans https) : le dire,
+        # sinon l'installation prendrait l'ancien chemin sans explication.
+        oh_warn "Adresse du panel invalide pour la connexion Steam (attendu https://hôte/api/hooks/steam/ticket) : connexion Steam ignorée. À signaler au support."
+        return 3
+    fi
+    if ! oh_valid_ticket "$ticket"; then
         return 3
     fi
 
@@ -558,7 +575,11 @@ oh_main() {
             rm -rf -- "$work"
             return 1
         fi
-        cp -- "$hook" "$work/hook.sh" && chmod 644 "$work/hook.sh"
+        if ! cp -- "$hook" "$work/hook.sh" || ! chmod 644 "$work/hook.sh"; then
+            oh_fail "Crochet illisible : $hook"
+            rm -rf -- "$work"
+            return 1
+        fi
         hook="$work/hook.sh"
     fi
 

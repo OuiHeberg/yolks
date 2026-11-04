@@ -235,6 +235,23 @@ OUT="$(run_worker "$S" "$W" "" 2>&1)"; STATUS=$?
 chmod 755 "$S"
 check "scénario 13 : échec signalé au panel" '[ "$STATUS" -ne 0 ] && [ "$(jq -r .login "$ROOT/report.json")" = failed ] && [ -z "$(find "$ROOT/s13" -name account.config)" ]'
 
+# --- scénario 14 : crochet annoncé mais absent, ou sans oh_hook : échec visible --
+S="$ROOT/s14/server"; W="$ROOT/s14/work"; mkdir -p "$S" "$W"; rm -f "$ROOT/report.json"
+redeem "$DECL_ACCOUNT" '[]' 1
+OUT="$(run_worker "$S" "$W" "$ROOT/crochet-absent.sh" 2>&1)"; STATUS=$?
+check "scénario 14 : crochet absent = échec, jamais « installé »" '[ "$STATUS" -ne 0 ] && grep -q "crochet de l'\''egg est introuvable" <<< "$OUT" && [ "$(jq -r .login "$ROOT/report.json")" = failed ]'
+printf 'autre_fonction() { :; }\n' > "$ROOT/sans-oh-hook.sh"
+S="$ROOT/s14b/server"; W="$ROOT/s14b/work"; mkdir -p "$S" "$W"; rm -f "$ROOT/report.json"
+redeem "$DECL_ACCOUNT" '[]' 1
+OUT="$(run_worker "$S" "$W" "$ROOT/sans-oh-hook.sh" 2>&1)"; STATUS=$?
+check "scénario 14 bis : crochet sans oh_hook = échec" '[ "$STATUS" -ne 0 ] && grep -q "ne définit pas oh_hook" <<< "$OUT" && [ "$(jq -r .login "$ROOT/report.json")" = failed ]'
+
+# --- scénario 15 : ticket émis mais adresse du panel mal réglée : rend 3, et le dit
+OUT="$(env -i PATH="$ROOT/bin:/usr/bin:/bin" OH_TICKET="$TICKET" OH_TICKET_URL="https://panel.test/sous-dossier/api/hooks/steam/ticket" bash "$INSTALLER" 2>&1)"; STATUS=$?
+check "scénario 15 : adresse avec un chemin = code 3 et avertissement" '[ "$STATUS" -eq 3 ] && grep -q "Adresse du panel invalide" <<< "$OUT"'
+OUT="$(env -i PATH="$ROOT/bin:/usr/bin:/bin" OH_TICKET="" OH_TICKET_URL="https://panel.test/api/hooks/steam/ticket" bash "$INSTALLER" 2>&1)"; STATUS=$?
+check "scénario 15 bis : sans ticket = code 3, en silence" '[ "$STATUS" -eq 3 ] && [ -z "$OUT" ]'
+
 # --- aucun secret dans la ligne de commande d'un processus ----------------------
 check "le ticket ne passe jamais en argument (curl, jq)" '[ -s "$ROOT/argv.log" ] && ! grep -q "$TICKET" "$ROOT/argv.log"'
 check "le jeton de compte rendu non plus" '! grep -q "$REPORT_TOKEN" "$ROOT/argv.log"'
