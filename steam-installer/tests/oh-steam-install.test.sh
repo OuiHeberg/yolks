@@ -248,7 +248,9 @@ check "scénario 14 bis : crochet sans oh_hook = échec" '[ "$STATUS" -ne 0 ] &&
 
 # --- scénario 15 : ticket émis mais adresse du panel mal réglée : rend 3, et le dit
 OUT="$(env -i PATH="$ROOT/bin:/usr/bin:/bin" OH_TICKET="$TICKET" OH_TICKET_URL="https://panel.test/sous-dossier/api/hooks/steam/ticket" bash "$INSTALLER" 2>&1)"; STATUS=$?
-check "scénario 15 : adresse avec un chemin = code 3 et avertissement" '[ "$STATUS" -eq 3 ] && grep -q "Adresse du panel invalide" <<< "$OUT"'
+check "scénario 15 : adresse avec un chemin = code 4 et message" '[ "$STATUS" -eq 4 ] && grep -q "Adresse du panel invalide" <<< "$OUT" && grep -q "rien n'\''a été téléchargé" <<< "$OUT"'
+OUT="$(env -i PATH="$ROOT/bin:/usr/bin:/bin" OH_TICKET="unavailable" OH_TICKET_URL="https://panel.test/api/hooks/steam/ticket" bash "$INSTALLER" 2>&1)"; STATUS=$?
+check "scénario 15 ter : ticket non émis par le panel = code 4, message juste" '[ "$STATUS" -eq 4 ] && grep -q "n'\''a pas pu préparer la connexion Steam" <<< "$OUT" && ! grep -qi "aucun compte" <<< "$OUT"'
 OUT="$(env -i PATH="$ROOT/bin:/usr/bin:/bin" OH_TICKET="" OH_TICKET_URL="https://panel.test/api/hooks/steam/ticket" bash "$INSTALLER" 2>&1)"; STATUS=$?
 check "scénario 15 bis : sans ticket = code 3, en silence" '[ "$STATUS" -eq 3 ] && [ -z "$OUT" ]'
 
@@ -263,7 +265,7 @@ check "sans ticket : code 3 (l'\''egg prend son ancien chemin)" '[ "$STATUS" -eq
 OUT="$(env -i PATH="$ROOT/bin:/usr/bin:/bin" OH_TICKET="__OUIPANEL_STEAM_TICKET__" OH_TICKET_URL="https://panel.test/api/hooks/steam/ticket" bash "$INSTALLER" 2>&1)"; STATUS=$?
 check "repère non remplacé : code 3" '[ "$STATUS" -eq 3 ]'
 OUT="$(env -i PATH="$ROOT/bin:/usr/bin:/bin" OH_TICKET="$TICKET" OH_TICKET_URL="http://panel.test/api/hooks/steam/ticket" bash "$INSTALLER" 2>&1)"; STATUS=$?
-check "adresse en http : code 3" '[ "$STATUS" -eq 3 ]'
+check "adresse en http : code 4 (connexion prévue mais inutilisable), jamais l'\''ancien chemin" '[ "$STATUS" -eq 4 ] && grep -q "Adresse du panel invalide" <<< "$OUT"'
 OUT="$(env -i PATH="$ROOT/bin:/usr/bin:/bin" OH_TICKET="$TICKET" OH_TICKET_URL="https://panel.test/api/hooks/steam/ticket" bash "$INSTALLER" --env LD_PRELOAD 2>&1)"; STATUS=$?
 check "variable dangereuse refusée" '[ "$STATUS" -eq 1 ] && grep -q "Variable refusée" <<< "$OUT"'
 

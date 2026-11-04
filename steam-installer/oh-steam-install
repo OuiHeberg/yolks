@@ -23,7 +23,10 @@
 #  5. rend compte au panel (/api/hooks/steam/report).
 #
 # Codes de sortie : 0 réussi ; 1 échec ; 3 pas de ticket (le script de l'egg
-# prend alors son ancien chemin, par exemple STEAM_USER / STEAM_PASS).
+# prend alors son ancien chemin, par exemple STEAM_USER / STEAM_PASS) ;
+# 4 connexion Steam PRÉVUE mais inutilisable (le panel n'a pas pu émettre le
+# ticket : repère « unavailable » ; ou adresse du panel invalide) : rien n'est
+# téléchargé, et le script de l'egg ne doit PAS dire « aucun compte connecté ».
 #
 # SÉCURITÉ (le volume /mnt/server appartient au client et à ses
 # sous-utilisateurs, qui peuvent y avoir posé des liens symboliques) :
@@ -526,12 +529,16 @@ oh_main() {
     # Le ticket : lu ici, puis retiré de l'environnement.
     local ticket="${OH_TICKET:-}" url="${OH_TICKET_URL:-}"
     unset OH_TICKET OH_TICKET_URL
+    if [ "$ticket" = "unavailable" ]; then
+        # Le panel a voulu émettre un ticket et n'a pas pu (ServerInstallController).
+        oh_fail "Le panel n'a pas pu préparer la connexion Steam de cette installation : rien n'a été téléchargé. Relancez l'installation ; si cela se reproduit, contactez le support."
+        return 4
+    fi
     if oh_valid_ticket "$ticket" && ! oh_valid_ticket_url "$url"; then
         # Un ticket a été émis mais l'adresse du panel est mal réglée
-        # (STEAM_TICKET_URL ou APP_URL avec un chemin, ou sans https) : le dire,
-        # sinon l'installation prendrait l'ancien chemin sans explication.
-        oh_warn "Adresse du panel invalide pour la connexion Steam (attendu https://hôte/api/hooks/steam/ticket) : connexion Steam ignorée. À signaler au support."
-        return 3
+        # (STEAM_TICKET_URL ou APP_URL avec un chemin, ou sans https).
+        oh_fail "Adresse du panel invalide pour la connexion Steam (attendu https://hôte/api/hooks/steam/ticket) : rien n'a été téléchargé. Contactez le support."
+        return 4
     fi
     if ! oh_valid_ticket "$ticket"; then
         return 3
