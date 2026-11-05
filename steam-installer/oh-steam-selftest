@@ -1,0 +1,40 @@
+#!/bin/bash
+#
+# oh-steam-selftest : contrôle SANS RÉSEAU de l'image steam-installer.
+#
+# Vérifie que le DepotDownloader de l'image lit bien le fichier account.config
+# que le panel fabrique (DepotDownloaderAccountConfig) : avec un jeton
+# enregistré pour le compte, il ne demande PAS de mot de passe. Le fichier
+# ci-dessous a été produit par le code du panel avec un compte et un jeton
+# FACTICES (aucun vrai compte Steam), et le banc PHP
+# (tests/Unit/Services/Steam/DepotDownloaderAccountConfigTest.php) vérifie
+# qu'il est toujours identique à ce que le panel produit.
+#
+# À lancer après la construction, réseau coupé :
+#   docker run --rm --network none ghcr.io/ouiheberg/yolks:steam-installer oh-steam-selftest
+# Code de sortie 0 si DepotDownloader a repris le jeton.
+
+set -u
+FIXTURE='UyrjEswvzSxIzEvNiS9OzUkrSS0uEUpMrfTKSHJPzvTP9CpNMjLN8cwz0AOKVaWEewLFPI39skKNfENcTf2qso18XTyN/EKSK/2dPYs9c90Mo5w9zcIrvbKS3HNykvICMyMiDPRgVujCrAAA'
+DD="${OH_DD_BIN:-/opt/depotdownloader/DepotDownloader}"
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+export HOME="$work" DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 DOTNET_CLI_TELEMETRY_OPTOUT=1
+
+"$DD" -V > /dev/null 2>&1 < /dev/null
+store="$(find "$work" -type d -name AssemFiles -print -quit)"
+if [ -z "$store" ]; then
+    echo "ÉCHEC : DepotDownloader n'a pas créé son stockage."
+    exit 1
+fi
+printf '%s' "$FIXTURE" | base64 -d > "$store/account.config"
+
+out="$(timeout 30 "$DD" -app 223350 -username ouipanel_selftest -remember-password -manifest-only -dir "$work/out" < /dev/null 2>&1)"
+if printf '%s' "$out" | grep -qi 'password'; then
+    echo "ÉCHEC : DepotDownloader demande un mot de passe, il n'a pas lu le jeton du fichier account.config."
+    printf '%s\n' "$out" | tail -5
+    exit 1
+fi
+echo "OK : DepotDownloader a repris le jeton enregistré (connexion à Steam tentée sans mot de passe)."
+exit 0

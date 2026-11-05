@@ -1,0 +1,634 @@
+#!/bin/bash
+#
+# oh-steam-install : installateur Steam COMMUN d'OuiPanel.
+# Image : ghcr.io/ouiheberg/yolks:steam-installer (deploy/steam-installer).
+#
+# Appelé par le script d'installation d'un egg qui déclare `steam` (colonne
+# eggs.steam, SteamDeclaration), en root dans le conteneur d'installation :
+#
+#   OH_TICKET="$OH_TICKET" OH_TICKET_URL="$OH_TICKET_URL" \
+#       oh-steam-install [--hook FICHIER] [--env NOM]... [--validate]
+#
+# Ce qu'il fait, et rien d'autre :
+#  1. échange le ticket à usage unique (le panel l'a mis dans le script) contre
+#     la déclaration de l'egg, la liste du Workshop et, s'il y en a un, le
+#     compte Steam du propriétaire (fichier account.config de DepotDownloader) ;
+#  2. télécharge le serveur (app déclarée) : DepotDownloader avec le compte,
+#     ou SteamCMD ANONYME si le jeu le permet et qu'aucun compte n'est lié ;
+#     les chemins `preserve` qui existent déjà ne sont jamais réécrits ;
+#  3. télécharge les objets du Workshop dans le dossier Steam standard
+#     <install_dir>/steamapps/workshop/content/<app du jeu>/<id> ;
+#  4. EFFACE le jeton, puis lance le crochet de l'egg (`oh_hook` du fichier
+#     --hook), qui range à la façon du jeu (dossiers de mods, clés...) ;
+#  5. rend compte au panel (/api/hooks/steam/report).
+#
+# Codes de sortie : 0 réussi ; 1 échec ; 3 pas de ticket (le script de l'egg
+# prend alors son ancien chemin, par exemple STEAM_USER / STEAM_PASS) ;
+# 4 connexion Steam PRÉVUE mais inutilisable (le panel n'a pas pu émettre le
+# ticket : repère « unavailable » ; ou adresse du panel invalide) : rien n'est
+# téléchargé, et le script de l'egg ne doit PAS dire « aucun compte connecté ».
+#
+# SÉCURITÉ (le volume /mnt/server appartient au client et à ses
+# sous-utilisateurs, qui peuvent y avoir posé des liens symboliques) :
+#  - le ticket ne passe ni par la ligne de commande ni par l'environnement du
+#    travail non privilégié : un fichier 0600 dans /tmp, lu puis effacé ;
+#  - le jeton n'est jamais dans une variable d'environnement ni dans le
+#    volume : un fichier 0600 dans /tmp (tmpfs du conteneur), effacé dès la
+#    fin des téléchargements, AVANT le crochet ;
+#  - tout le travail sur le volume tourne sous l'uid propriétaire du volume
+#    (setpriv, no_new_privs), jamais en root, dans /tmp, sans fichier core ;
+#  - les liens symboliques du volume qui sortent du volume sont supprimés
+#    avant tout téléchargement ; aucune copie ne suit un lien ;
+#  - chaque valeur reçue du panel est revérifiée ici avant d'entrer dans une
+#    commande.
+#
+# Variables vues par le crochet : OH_SERVER_DIR, OH_INSTALL_DIR,
+# OH_WORKSHOP_APP, OH_WORKSHOP_DIR, OH_WORKSHOP_LIST (une ligne par objet :
+# « id<TAB>état<TAB>serveur_seul<TAB>titre », état = downloaded | unchanged |
+# failed), OH_ITEM_RESULTS (le crochet peut y écrire « id<TAB>installed|failed »),
+# OH_LOGIN (account | anonymous), OH_STEAMCLIENT_DIR, OH_WORK_DIR, et les
+# variables nommées par --env.
+
+OH_SELF="$(readlink -f -- "${BASH_SOURCE[0]}")"
+
+oh_say() { printf '[OuiPanel] %s\n' "$*"; }
+oh_warn() { printf '[OuiPanel] ATTENTION : %s\n' "$*"; }
+oh_fail() { printf '[OuiPanel] ERREUR : %s\n' "$*"; }
+
+oh_valid_ticket() { [[ "$1" =~ ^[0-9a-f]{64}$ ]]; }
+oh_valid_ticket_url() { [[ "$1" =~ ^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?/api/hooks/steam/ticket$ ]]; }
+oh_valid_account() { [[ "$1" =~ ^[A-Za-z0-9_]{1,64}$ ]]; }
+oh_valid_id() { [[ "$1" =~ ^[1-9][0-9]{0,19}$ ]]; }
+oh_valid_branch() { [[ "$1" =~ ^[A-Za-z0-9_.-]{1,64}$ ]]; }
+oh_valid_platform() { [[ "$1" == linux || "$1" == windows ]]; }
+# Un chemin relatif : segments [A-Za-z0-9_][A-Za-z0-9_.-]*, sans « .. ».
+oh_valid_relpath() {
+    # Sans globbing : « * » ne doit pas devenir les fichiers du dossier courant.
+    local -
+    set -f
+    local path="${1%/}" seg
+    [ -n "$path" ] && [ "${#path}" -le 200 ] || return 1
+    local IFS=/
+    for seg in $path; do
+        [[ "$seg" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$ ]] || return 1
+    done
+    return 0
+}
+oh_valid_env_name() {
+    [[ "$1" =~ ^[A-Z][A-Z0-9_]{0,63}$ ]] || return 1
+    case "$1" in
+        OH_*|PATH|HOME|IFS|ENV|BASH_ENV|SHELLOPTS|BASHOPTS|PS4|LD_*|DOTNET_*|LANG|LC_*) return 1 ;;
+    esac
+    return 0
+}
+
+# Un dossier réel (pas un lien) : supprime le lien éventuel puis le crée.
+oh_real_dir() {
+    local dir="$1"
+    if [ -L "$dir" ] || { [ -e "$dir" ] && [ ! -d "$dir" ]; }; then
+        rm -f -- "$dir"
+    fi
+    mkdir -p -- "$dir" && [ -d "$dir" ] && [ ! -L "$dir" ]
+}
+
+# Échappe un chemin pour une expression régulière .NET (DepotDownloader -filelist).
+oh_regex_escape() {
+    printf '%s' "$1" | sed 's/[^A-Za-z0-9_/-]/\\&/g'
+}
+
+# ===========================================================================
+# Travail NON PRIVILÉGIÉ
+# ===========================================================================
+
+# DepotDownloader avec le compte (sortie masquée, gardée pour l'analyse).
+oh_dd() {
+    local log="$OH_WORK_DIR/depotdownloader.log"
+    HOME="$OH_WORK_DIR/home" DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 DOTNET_CLI_TELEMETRY_OPTOUT=1 \
+        "$OH_DD_BIN" -username "$OH_ACCOUNT" -remember-password -max-downloads 8 "$@" < /dev/null 2>&1 \
+        | tee -a "$log" | sed -u "s/${OH_ACCOUNT}/[compte Steam]/g"
+    return "${PIPESTATUS[0]}"
+}
+
+# SteamCMD anonyme, depuis une copie dans /tmp (il se met à jour lui-même).
+# SteamCMD rend souvent 0 même en échec : réussi seulement si sa sortie
+# contient le message de succès attendu ($1, expression régulière).
+oh_steamcmd() {
+    local success="$1" dir="$OH_WORK_DIR/steamcmd" log="$OH_WORK_DIR/steamcmd.log"
+    shift
+    if [ ! -x "$dir/steamcmd.sh" ]; then
+        mkdir -p -- "$dir" && cp -a -- "$OH_STEAMCMD_DIR/." "$dir/" || return 1
+    fi
+    : > "$log"
+    # Son code de sortie ne dit rien de sûr : seul le message compte.
+    HOME="$OH_WORK_DIR/home" "$dir/steamcmd.sh" "$@" < /dev/null 2>&1 | tee -a "$log"
+    grep -qE "$success" "$log"
+}
+
+oh_token_rejected() {
+    grep -q 'Access token was rejected' "$OH_WORK_DIR/depotdownloader.log" 2> /dev/null
+}
+
+# Efface le jeton : le fichier account.config, et tout le dossier personnel
+# de DepotDownloader.
+oh_wipe_token() {
+    if [ -n "${OH_WORK_DIR:-}" ] && [ -d "$OH_WORK_DIR/home" ]; then
+        find "$OH_WORK_DIR/home" -type f -name 'account.config' -exec shred -u -- {} + 2> /dev/null
+        rm -rf -- "$OH_WORK_DIR/home"
+    fi
+    rm -f -- "$OH_WORK_DIR/redeem.json" "$OH_WORK_DIR/ticket"
+    mkdir -p -m 700 "$OH_WORK_DIR/home"
+}
+
+# Les liens symboliques du dossier d'installation qui SORTENT du volume : un
+# jeu n'en a pas besoin, et un téléchargement ou une copie pourrait écrire ou
+# lire au travers. Ceux qui restent dans le volume sont gardés.
+oh_drop_escaping_links() {
+    local root="$1" link target
+    while IFS= read -r -d '' link; do
+        target="$(readlink -m -- "$link")"
+        case "$target" in
+            # Dans le volume ; ou vers /home/container, son chemin dans le
+            # conteneur du jeu (rien n'y existe dans celui d'installation).
+            "$OH_SERVER_DIR"|"$OH_SERVER_DIR"/*|/home/container|/home/container/*) ;;
+            *)
+                rm -f -- "$link"
+                oh_warn "Lien symbolique retiré (il sortait du serveur) : ${link#"$OH_SERVER_DIR"/}"
+                ;;
+        esac
+    done < <(find "$root" -xdev -type l -print0 2> /dev/null)
+}
+
+# POST d'un fichier JSON au panel. Le corps est dans un FICHIER (jamais dans
+# la ligne de commande d'un processus). Jusqu'à 6 essais, sur environ 3 à 5
+# minutes, sur 429 (sauf « too_many_failures » : la requête a été traitée et
+# refusée), 5xx et panne réseau ; l'attente respecte Retry-After, croît à
+# chaque essai et reçoit un peu de hasard (deux installations du même node ne
+# réessaient pas ensemble). Rend 0 (200), 1 (refus), 2 (panel injoignable).
+#   oh_post <corps> <réponse> <adresse>
+oh_post() {
+    local body="$1" out="$2" url="$3" attempt code wait retry
+    local headers="$OH_WORK_DIR/post-headers.txt" base="${OH_RETRY_DELAY:-10}"
+    # Décimal sans zéro de tête : « 08 » serait lu en octal par $(( )).
+    [[ "$base" =~ ^(0|[1-9][0-9]{0,2})$ ]] || base=10
+    for attempt in 1 2 3 4 5 6; do
+        code="$(curl -sS --proto '=https' --tlsv1.2 --max-time 60 --max-filesize 1048576 \
+            -H 'Content-Type: application/json' -H 'Accept: application/json' \
+            --data-binary "@$body" -D "$headers" -o "$out" -w '%{http_code}' "$url" 2> /dev/null)" || code="000"
+        case "$code" in
+            200) rm -f -- "$headers"; return 0 ;;
+            429)
+                if grep -q 'too_many_failures' "$out" 2> /dev/null; then
+                    rm -f -- "$headers"
+                    return 1
+                fi
+                ;;
+            5[0-9][0-9]|000) ;;
+            *) rm -f -- "$headers"; return 1 ;;
+        esac
+        [ "$attempt" -lt 6 ] || break
+        wait=$(( base * attempt ))
+        retry="$(grep -i '^retry-after:' "$headers" 2> /dev/null | head -1 | tr -dc '0-9' | cut -c1-4)"
+        # Lu en base 10 (« 08 » ne doit pas devenir un nombre octal invalide).
+        [[ "$retry" =~ ^[0-9]{1,4}$ ]] && retry=$(( 10#$retry ))
+        if [[ "$retry" =~ ^[0-9]+$ ]] && [ "$retry" -gt "$wait" ]; then
+            wait="$retry"
+        fi
+        [ "$wait" -le 120 ] || wait=120
+        [ "$base" -gt 0 ] && wait=$(( wait + RANDOM % 5 ))
+        oh_warn "Panel occupé ou injoignable (réponse $code) : nouvel essai dans $wait s."
+        sleep "$wait"
+    done
+    rm -f -- "$headers"
+    return 2
+}
+
+# Échange le ticket. Rend 0 et remplit les variables OH_*, ou 1.
+oh_redeem() {
+    local redeem="$OH_WORK_DIR/redeem.json" ticket store
+    ticket="$(cat -- "$OH_WORK_DIR/ticket" 2> /dev/null)"
+    rm -f -- "$OH_WORK_DIR/ticket"
+    oh_valid_ticket "$ticket" || { oh_fail "Ticket illisible."; return 1; }
+
+    # Le corps, écrit par printf (interne à bash) : le ticket n'apparaît dans la
+    # ligne de commande d'aucun processus. Le ticket n'a que [0-9a-f].
+    ( umask 077; : > "$redeem"; printf '{"ticket":"%s"}' "$ticket" > "$OH_WORK_DIR/redeem-request.json" )
+    ticket=""
+    oh_post "$OH_WORK_DIR/redeem-request.json" "$redeem" "$OH_TICKET_URL"
+    local posted=$?
+    rm -f -- "$OH_WORK_DIR/redeem-request.json"
+    if [ "$posted" -ne 0 ]; then
+        oh_fail "Le panel n'a pas remis la connexion Steam (ticket refusé ou expiré, ou panel injoignable)."
+        rm -f -- "$redeem"
+        return 1
+    fi
+
+    OH_REPORT_TOKEN="$(jq -r '.report_token // empty' "$redeem")"
+    OH_APP="$(jq -r '.steam.app_id // empty | tostring' "$redeem")"
+    OH_LOGIN_REQUIRED="$(jq -r 'if .steam.login_required == true then "1" else "0" end' "$redeem")"
+    OH_BRANCH="$(jq -r '.steam.branch // "public"' "$redeem")"
+    OH_PLATFORM="$(jq -r '.steam.platform // "linux"' "$redeem")"
+    OH_INSTALL_REL="$(jq -r '.steam.install_dir // ""' "$redeem")"
+    OH_WORKSHOP_APP="$(jq -r 'if .steam.workshop.enabled == true then (.steam.workshop.app_id | tostring) else "" end' "$redeem")"
+    OH_ACCOUNT="$(jq -r '.account.name // empty' "$redeem")"
+
+    if ! oh_valid_ticket "$OH_REPORT_TOKEN" || ! oh_valid_id "$OH_APP" || ! oh_valid_branch "$OH_BRANCH" \
+        || ! oh_valid_platform "$OH_PLATFORM" || { [ -n "$OH_INSTALL_REL" ] && ! oh_valid_relpath "$OH_INSTALL_REL"; } \
+        || { [ -n "$OH_WORKSHOP_APP" ] && ! oh_valid_id "$OH_WORKSHOP_APP"; } \
+        || { [ -n "$OH_ACCOUNT" ] && ! oh_valid_account "$OH_ACCOUNT"; }; then
+        oh_fail "Réponse du panel illisible."
+        rm -f -- "$redeem"
+        return 1
+    fi
+
+    # Les chemins à garder, revérifiés un par un.
+    : > "$OH_WORK_DIR/preserve.txt"
+    local path
+    while IFS= read -r path; do
+        oh_valid_relpath "$path" && printf '%s\n' "$path" >> "$OH_WORK_DIR/preserve.txt"
+    done < <(jq -r '.steam.preserve[]? // empty' "$redeem")
+
+    # La liste du Workshop : « id<TAB>à télécharger<TAB>serveur seul<TAB>titre ».
+    jq -r '.workshop[]? | [(.id|tostring), (if .update then "1" else "0" end), (if .server_side then "1" else "0" end), ((.title // "") | gsub("[\\t\\n\\r[:cntrl:]]"; " ") | .[0:120])] | @tsv' \
+        "$redeem" > "$OH_WORK_DIR/workshop-in.tsv" 2> /dev/null || : > "$OH_WORK_DIR/workshop-in.tsv"
+
+    if [ -n "$OH_ACCOUNT" ]; then
+        # Le stockage de DepotDownloader (dossier « isolé » .NET), créé par un
+        # premier lancement sans réseau, puis le fichier de jeton déposé dedans.
+        mkdir -p -m 700 "$OH_WORK_DIR/home"
+        HOME="$OH_WORK_DIR/home" DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 "$OH_DD_BIN" -V > /dev/null 2>&1 < /dev/null
+        store="$(find "$OH_WORK_DIR/home" -type d -name AssemFiles -print -quit)"
+        if [ -z "$store" ] || ! jq -r '.account.config // empty' "$redeem" | base64 -d > "$store/account.config" 2> /dev/null \
+            || [ ! -s "$store/account.config" ]; then
+            oh_fail "Impossible de préparer la connexion Steam."
+            oh_wipe_token
+            return 1
+        fi
+        chmod 600 "$store/account.config"
+        OH_LOGIN="account"
+    elif [ "$OH_LOGIN_REQUIRED" = "1" ]; then
+        oh_fail "Ce jeu demande un compte Steam, et aucun n'est connecté. Connectez votre compte Steam dans l'onglet « Steam » du panel."
+        rm -f -- "$redeem"
+        return 1
+    else
+        OH_LOGIN="anonymous"
+    fi
+    rm -f -- "$redeem"
+
+    return 0
+}
+
+# Les chemins `preserve` qui existent : liste « -filelist » pour DepotDownloader
+# (une expression qui les exclut : ni téléchargés, ni validés, ni effacés).
+# Rend 1 si rien n'est à garder.
+oh_filelist() {
+    local install="$1" list="$2" path regex="regex:^" shown=() any=0
+    while IFS= read -r path; do
+        if [[ "$path" == */ ]]; then
+            [ -d "$install/${path%/}" ] && [ -n "$(ls -A "$install/${path%/}" 2> /dev/null)" ] || continue
+            regex+="(?!$(oh_regex_escape "$path"))"
+        else
+            [ -e "$install/$path" ] || [ -L "$install/$path" ] || continue
+            regex+="(?!$(oh_regex_escape "$path")\$)"
+        fi
+        shown+=("$path")
+        any=1
+    done < "$OH_WORK_DIR/preserve.txt"
+    [ "$any" -eq 1 ] || { rm -f -- "$list"; return 1; }
+    printf '%s\n' "${regex}.+\$" > "$list"
+    oh_say "Gardés tels quels (jamais réécrits par la mise à jour) : ${shown[*]}"
+    return 0
+}
+
+# SteamCMD n'a pas de liste de fichiers : les chemins à garder sont mis de
+# côté (déplacés dans le volume, sans copie) puis remis, quoi qu'il arrive.
+oh_preserve_aside() {
+    local install="$1" aside="$install/.ouipanel-preserve" path i=0
+    : > "$OH_WORK_DIR/aside.tsv"
+    while IFS= read -r path; do
+        path="${path%/}"
+        [ -e "$install/$path" ] || [ -L "$install/$path" ] || continue
+        oh_real_dir "$aside" || return 1
+        mv -T -- "$install/$path" "$aside/$i" || return 1
+        printf '%s\t%s\n' "$i" "$path" >> "$OH_WORK_DIR/aside.tsv"
+        i=$((i + 1))
+    done < "$OH_WORK_DIR/preserve.txt"
+    [ "$i" -gt 0 ] && oh_say "Mis de côté pendant la mise à jour (remis ensuite tels quels) : $(cut -f2 "$OH_WORK_DIR/aside.tsv" | tr '\n' ' ')"
+    return 0
+}
+
+oh_preserve_restore() {
+    local install="$1" aside="$install/.ouipanel-preserve" i path ok=0
+    [ -s "$OH_WORK_DIR/aside.tsv" ] || return 0
+    while IFS=$'\t' read -r i path; do
+        rm -rf -- "${install:?}/$path"
+        mkdir -p -- "$(dirname -- "$install/$path")"
+        mv -T -- "$aside/$i" "$install/$path" || ok=1
+    done < "$OH_WORK_DIR/aside.tsv"
+    rmdir -- "$aside" 2> /dev/null
+    [ "$ok" -eq 0 ] || oh_warn "Certains fichiers mis de côté n'ont pas pu être remis : ils sont dans .ouipanel-preserve."
+    return 0
+}
+
+oh_report() {
+    local login="$1" body="$OH_WORK_DIR/report-request.json"
+    oh_valid_ticket "${OH_REPORT_TOKEN:-}" || return 0
+    case "$login" in ok|anonymous|failed|token_rejected) ;; *) login="failed" ;; esac
+    [ -f "$OH_WORK_DIR/item-final.tsv" ] || : > "$OH_WORK_DIR/item-final.tsv"
+    jq -R -s -c 'split("\n") | map(select(length > 0) | split("\t") | {id: .[0], status: .[1]})' "$OH_WORK_DIR/item-final.tsv" > "$OH_WORK_DIR/items.json" 2> /dev/null \
+        || printf '[]' > "$OH_WORK_DIR/items.json"
+    # Le jeton de compte rendu, comme le ticket, n'est passé qu'à printf.
+    (
+        umask 077
+        printf '{"report_token":"%s","login":"%s","items":' "$OH_REPORT_TOKEN" "$login" > "$body"
+        cat -- "$OH_WORK_DIR/items.json" >> "$body"
+        printf '}' >> "$body"
+    )
+    oh_post "$body" "$OH_WORK_DIR/report-response.json" "${OH_TICKET_URL%/ticket}/report" \
+        || oh_warn "Le compte rendu n'a pas pu être envoyé au panel (sans effet sur le serveur)."
+    rm -f -- "$body" "$OH_WORK_DIR/report-response.json"
+    OH_REPORT_TOKEN=""
+}
+
+oh_worker() {
+    set -o pipefail
+    umask 022
+    cd "$OH_WORK_DIR" || return 1
+
+    local status=0 login="ok" install id update server_side title target
+    : > "$OH_WORK_DIR/workshop.tsv"
+    : > "$OH_WORK_DIR/item-results.tsv"
+    : > "$OH_WORK_DIR/item-final.tsv"
+
+    oh_say "Connexion Steam du panel : récupération de l'accès (aucun mot de passe n'est utilisé)."
+    if ! oh_redeem; then
+        # Échange fait mais réponse refusée ici : le panel saura que
+        # l'installation a échoué (sinon la page dirait « en cours » 6 h).
+        oh_wipe_token
+        oh_report failed
+        return 1
+    fi
+    [ "$OH_LOGIN" = "anonymous" ] && login="anonymous"
+
+    install="$OH_SERVER_DIR"
+    if [ -n "$OH_INSTALL_REL" ]; then
+        install="$OH_SERVER_DIR/$OH_INSTALL_REL"
+        # Chaque segment, un vrai dossier.
+        local seg built="$OH_SERVER_DIR" IFS_SAVE="$IFS"
+        IFS=/
+        set -f
+        for seg in $OH_INSTALL_REL; do
+            built="$built/$seg"
+            oh_real_dir "$built" || { IFS="$IFS_SAVE"; set +f; oh_fail "Dossier d'installation inutilisable."; oh_wipe_token; oh_report failed; return 1; }
+        done
+        set +f
+        IFS="$IFS_SAVE"
+    fi
+
+    oh_drop_escaping_links "$OH_SERVER_DIR"
+    [ -L "$install/.DepotDownloader" ] && rm -f -- "$install/.DepotDownloader"
+
+    # 1. Le serveur.
+    if [ "$OH_LOGIN" = "account" ]; then
+        oh_say "Téléchargement / mise à jour du serveur (app $OH_APP, $OH_PLATFORM) avec DepotDownloader..."
+        local args=(-app "$OH_APP" -os "$OH_PLATFORM" -osarch 64 -dir "$install")
+        [ "$OH_BRANCH" != "public" ] && args+=(-branch "$OH_BRANCH")
+        [ "${OH_VALIDATE:-0}" = "1" ] && args+=(-validate)
+        oh_filelist "$install" "$OH_WORK_DIR/filelist.txt" && args+=(-filelist "$OH_WORK_DIR/filelist.txt")
+        if ! oh_dd "${args[@]}"; then
+            status=1
+            if oh_token_rejected; then
+                login="token_rejected"
+                oh_fail "Steam a refusé la connexion (accès révoqué ou expiré). Reconnectez votre compte Steam dans l'onglet « Steam » du panel."
+            else
+                login="failed"
+                oh_fail "Le téléchargement du serveur a échoué."
+            fi
+        fi
+    else
+        oh_say "Téléchargement / mise à jour du serveur (app $OH_APP, $OH_PLATFORM) avec SteamCMD, sans compte..."
+        local cmd=(+@sSteamCmdForcePlatformType "$OH_PLATFORM" +force_install_dir "$install" +login anonymous +app_update "$OH_APP")
+        [ "$OH_BRANCH" != "public" ] && cmd+=(-beta "$OH_BRANCH")
+        [ "${OH_VALIDATE:-0}" = "1" ] && cmd+=(validate)
+        cmd+=(+quit)
+        if oh_preserve_aside "$install"; then
+            oh_steamcmd "Success! App '$OH_APP' fully installed" "${cmd[@]}" || { status=1; login="failed"; oh_fail "Le téléchargement du serveur a échoué."; }
+        else
+            status=1; login="failed"; oh_fail "Impossible de mettre de côté les fichiers à garder : rien n'a été téléchargé."
+        fi
+        oh_preserve_restore "$install"
+    fi
+
+    # 2. Le Workshop, dans le dossier Steam standard.
+    if [ "$status" -eq 0 ] && [ -n "$OH_WORKSHOP_APP" ] && [ -s "$OH_WORK_DIR/workshop-in.tsv" ]; then
+        local base="$install/steamapps/workshop/content/$OH_WORKSHOP_APP"
+        oh_real_dir "$install/steamapps" && oh_real_dir "$install/steamapps/workshop" \
+            && oh_real_dir "$install/steamapps/workshop/content" && oh_real_dir "$base" \
+            || { oh_fail "Dossier du Workshop inutilisable."; status=1; }
+        while [ "$status" -eq 0 ] && IFS=$'\t' read -r id update server_side title; do
+            if ! oh_valid_id "$id"; then
+                oh_warn "Objet ignoré (identifiant invalide)."
+                continue
+            fi
+            [ "$server_side" = "1" ] || server_side=0
+            target="$base/$id"
+            [ -L "$target" ] && rm -f -- "$target"
+            if [ "$update" != "1" ] && [ -d "$target" ] && [ -n "$(ls -A "$target" 2> /dev/null)" ]; then
+                oh_say "Objet $id ($title) : déjà à jour."
+                printf '%s\tunchanged\t%s\t%s\n' "$id" "$server_side" "$title" >> "$OH_WORK_DIR/workshop.tsv"
+                continue
+            fi
+            oh_say "Téléchargement de l'objet $id ($title)..."
+            local ok=1
+            if [ "$OH_LOGIN" = "account" ]; then
+                oh_real_dir "$target" && { [ ! -L "$target/.DepotDownloader" ] || rm -f -- "$target/.DepotDownloader"; } \
+                    && oh_dd -app "$OH_WORKSHOP_APP" -pubfile "$id" -dir "$target" && ok=0
+            else
+                oh_steamcmd "Success\\. Downloaded item $id" +force_install_dir "$install" +login anonymous +workshop_download_item "$OH_WORKSHOP_APP" "$id" +quit \
+                    && [ -d "$target" ] && [ ! -L "$target" ] && ok=0
+            fi
+            if [ "$ok" -eq 0 ] && [ -d "$target" ] && [ ! -L "$target" ]; then
+                printf '%s\tdownloaded\t%s\t%s\n' "$id" "$server_side" "$title" >> "$OH_WORK_DIR/workshop.tsv"
+            else
+                if [ "$OH_LOGIN" = "account" ] && oh_token_rejected; then
+                    login="token_rejected"
+                    oh_fail "Steam a refusé la connexion. Reconnectez votre compte Steam dans le panel."
+                    status=1
+                    break
+                fi
+                oh_warn "L'objet $id n'a pas pu être téléchargé (le compte doit posséder le jeu, et l'objet doit être public). L'ancienne version, s'il y en a une, est gardée."
+                printf '%s\tfailed\t%s\t%s\n' "$id" "$server_side" "$title" >> "$OH_WORK_DIR/workshop.tsv"
+            fi
+        done < "$OH_WORK_DIR/workshop-in.tsv"
+    fi
+
+    # 3. Plus besoin du jeton : il disparaît AVANT le crochet de l'egg.
+    oh_wipe_token
+
+    # 4. Le crochet de l'egg (rangement à la façon du jeu). Un crochet annoncé
+    # mais absent, ou sans fonction oh_hook, est un ÉCHEC : sinon le serveur
+    # serait déclaré installé sans avoir été préparé.
+    if [ "$status" -eq 0 ] && [ -n "${OH_HOOK:-}" ]; then
+        if [ ! -f "$OH_HOOK" ]; then
+            status=1
+            oh_fail "Le crochet de l'egg est introuvable : le serveur n'a pas été préparé."
+        else
+            (
+                export OH_INSTALL_DIR="$install" OH_WORKSHOP_APP OH_LOGIN
+                export OH_WORKSHOP_DIR="$install/steamapps/workshop/content/${OH_WORKSHOP_APP:-0}"
+                export OH_WORKSHOP_LIST="$OH_WORK_DIR/workshop.tsv" OH_ITEM_RESULTS="$OH_WORK_DIR/item-results.tsv"
+                cd "$install" || exit 1
+                # shellcheck disable=SC1090
+                source "$OH_HOOK" || exit 1
+                if ! declare -F oh_hook > /dev/null; then
+                    oh_fail "Le crochet de l'egg ne définit pas oh_hook."
+                    exit 1
+                fi
+                oh_hook
+            ) || { status=1; oh_fail "La préparation du serveur (crochet de l'egg) a échoué."; }
+        fi
+    fi
+
+    # 5. Le compte rendu : le résultat du crochet, sinon celui du téléchargement.
+    while IFS=$'\t' read -r id update server_side title; do
+        local final
+        final="$(awk -F'\t' -v id="$id" '$1 == id { s = $2 } END { print s }' "$OH_WORK_DIR/item-results.tsv")"
+        if [ -z "$final" ]; then
+            case "$update" in
+                downloaded) final="installed" ;;
+                failed) final="failed" ;;
+                *) final="" ;;
+            esac
+        fi
+        [ -n "$final" ] && printf '%s\t%s\n' "$id" "$final" >> "$OH_WORK_DIR/item-final.tsv"
+    done < "$OH_WORK_DIR/workshop.tsv"
+
+    [ "$status" -ne 0 ] && [ "$login" = "ok" ] && login="failed"
+    [ "$status" -ne 0 ] && [ "$login" = "anonymous" ] && login="failed"
+    oh_report "$login"
+    return "$status"
+}
+
+# ===========================================================================
+# Point d'entrée (root dans le conteneur d'installation)
+# ===========================================================================
+
+oh_main() {
+    local hook="" validate=0 envs=() name
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --hook) hook="${2:-}"; shift ;;
+            --env) name="${2:-}"; shift
+                oh_valid_env_name "$name" || { oh_fail "Variable refusée : $name"; return 1; }
+                envs+=("$name") ;;
+            --validate) validate=1 ;;
+            *) oh_fail "Argument inconnu : $1"; return 1 ;;
+        esac
+        shift
+    done
+
+    # Le ticket : lu ici, puis retiré de l'environnement.
+    local ticket="${OH_TICKET:-}" url="${OH_TICKET_URL:-}"
+    unset OH_TICKET OH_TICKET_URL
+    if [ "$ticket" = "unavailable" ]; then
+        # Le panel a voulu émettre un ticket et n'a pas pu (ServerInstallController).
+        oh_fail "Le panel n'a pas pu préparer la connexion Steam de cette installation : rien n'a été téléchargé. Relancez l'installation ; si cela se reproduit, contactez le support."
+        oh_fail "The panel could not prepare the Steam connection for this installation: nothing was downloaded. Start the installation again; if it happens again, contact support."
+        return 4
+    fi
+    if oh_valid_ticket "$ticket" && ! oh_valid_ticket_url "$url"; then
+        # Un ticket a été émis mais l'adresse du panel est mal réglée
+        # (STEAM_TICKET_URL ou APP_URL avec un chemin, ou sans https).
+        oh_fail "Adresse du panel invalide pour la connexion Steam (attendu https://hôte/api/hooks/steam/ticket) : rien n'a été téléchargé. Contactez le support."
+        oh_fail "Invalid panel address for the Steam connection (expected https://host/api/hooks/steam/ticket): nothing was downloaded. Contact support."
+        return 4
+    fi
+    if ! oh_valid_ticket "$ticket"; then
+        return 3
+    fi
+
+    ulimit -c 0
+    cd / || return 1
+
+    local server="${OH_SERVER_DIR:-/mnt/server}" uid gid work
+    # L'uid du volume (celui des conteneurs de Wings). Un volume laissé à root
+    # par un ancien script : l'uid de ce qu'il contient, sinon OH_FALLBACK_UID
+    # (988, l'utilisateur `pterodactyl` par défaut de Wings).
+    uid="$(stat -c %u "$server")"
+    gid="$(stat -c %g "$server")"
+    if [ "$uid" = "0" ]; then
+        local other
+        other="$(find "$server" -mindepth 1 -maxdepth 2 ! -uid 0 -printf '%U:%G\n' -quit 2> /dev/null)"
+        if [ -n "$other" ]; then
+            uid="${other%%:*}"; gid="${other##*:}"
+        else
+            uid="${OH_FALLBACK_UID:-988}"; gid="${OH_FALLBACK_GID:-$uid}"
+        fi
+        oh_say "Volume appartenant à root : travail sous l'uid $uid (Wings rechangera le propriétaire au démarrage)."
+    fi
+    [[ "$uid" =~ ^[1-9][0-9]*$ && "$gid" =~ ^[0-9]+$ ]] || { oh_fail "Propriétaire du volume illisible."; return 1; }
+
+    # Remettre au propriétaire ce qu'un ancien script a laissé à root, SANS
+    # suivre un lien (find -P, chown -h) et depuis le dossier de chaque entrée
+    # (-execdir : pas de course sur les dossiers parents).
+    find "$server" -xdev \( ! -uid "$uid" -o ! -gid "$gid" \) -execdir chown -h "$uid:$gid" -- {} + 2> /dev/null
+
+    if ! work="$(mktemp -d /tmp/oh-steam.XXXXXXXX)"; then
+        oh_fail "Impossible de créer un dossier temporaire (/tmp plein ou en lecture seule ?) : rien n'a été téléchargé. Réessayez ; si cela se reproduit, contactez le support."
+        oh_fail "Could not create a temporary folder (/tmp full or read-only?): nothing was downloaded. Try again; if it happens again, contact support."
+        return 1
+    fi
+    chmod 700 "$work" && chown "$uid:$gid" "$work" || { rm -rf -- "$work"; return 1; }
+    ( umask 077; printf '%s' "$ticket" > "$work/ticket" ) && chown "$uid:$gid" "$work/ticket" && chmod 600 "$work/ticket"
+    ticket=""
+    mkdir -p -m 700 "$work/home" && chown "$uid:$gid" "$work/home"
+
+    if [ -n "$hook" ]; then
+        if [ ! -f "$hook" ] || [ -L "$hook" ]; then
+            oh_fail "Crochet introuvable : $hook"
+            rm -rf -- "$work"
+            return 1
+        fi
+        if ! cp -- "$hook" "$work/hook.sh" || ! chmod 644 "$work/hook.sh"; then
+            oh_fail "Crochet illisible : $hook"
+            rm -rf -- "$work"
+            return 1
+        fi
+        hook="$work/hook.sh"
+    fi
+
+    # Le délai de base des nouveaux essais (bancs : 0) : un nombre, sinon 10.
+    [[ "${OH_RETRY_DELAY:-10}" =~ ^(0|[1-9][0-9]{0,2})$ ]] || OH_RETRY_DELAY=10
+
+    local passed=() n
+    for n in "${envs[@]}"; do
+        passed+=("$n=${!n:-}")
+    done
+
+    cd "$work" || return 1
+    setpriv --reuid="$uid" --regid="$gid" --clear-groups --no-new-privs \
+        env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 HOME="$work/home" \
+        OH_WORK_DIR="$work" OH_SERVER_DIR="$server" OH_TICKET_URL="$url" OH_HOOK="$hook" OH_VALIDATE="$validate" \
+        OH_DD_BIN="${OH_DD_BIN:-/opt/depotdownloader/DepotDownloader}" OH_STEAMCMD_DIR="${OH_STEAMCMD_DIR:-/opt/steamcmd}" \
+        OH_STEAMCLIENT_DIR="${OH_STEAMCLIENT_DIR:-/opt/steamclient}" OH_RETRY_DELAY="${OH_RETRY_DELAY:-10}" \
+        "${passed[@]}" \
+        bash "$OH_SELF" --worker
+    local status=$?
+    cd / || true
+
+    rm -rf -- "$work"
+    return "$status"
+}
+
+# Les bancs chargent les fonctions sans rien lancer.
+if [ "${OUIPANEL_INSTALL_TEST:-0}" = "1" ]; then
+    return 0 2> /dev/null || exit 0
+fi
+
+if [ "${1:-}" = "--worker" ]; then
+    ulimit -c 0
+    oh_worker
+    exit $?
+fi
+
+oh_main "$@"
+exit $?
