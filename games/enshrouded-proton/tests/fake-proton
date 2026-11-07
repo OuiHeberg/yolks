@@ -1,0 +1,47 @@
+#!/usr/bin/python3 -I
+# Faux script proton du banc (tests/entrypoint-check.sh, scénario 3). Lancé par
+# la commande de démarrage du README à la place de ${PROTON_PATH}/proton, il
+# joue Proton, Wine et le jeu pour ce que le banc contrôle :
+#  - il note ses arguments, son dossier, quelques variables, et les signaux
+#    qu'il a reçus ignorés en héritage (le trap de l'entrypoint) ;
+#  - il écrit la ligne « HostOnline » dans le journal du jeu, comme Enshrouded ;
+#  - il installe son propre gestionnaire de SIGINT, comme Wine (qui le fait même
+#    quand SIGINT est ignoré à son lancement), et n'en installe pas pour
+#    SIGTERM, comme Wine ;
+#  - à SIGINT, il « sauvegarde » pendant 2 s, écrit ./saved, puis sort.
+import os
+import signal
+import sys
+import time
+
+here = os.path.dirname(os.path.abspath(__file__))
+
+
+def note(name, text):
+    with open(os.path.join(here, name), "w") as f:
+        f.write(text)
+
+
+def inherited(sig):
+    return "ignored" if signal.getsignal(sig) == signal.SIG_IGN else "not-ignored"
+
+
+note("args", "".join(a + "\n" for a in sys.argv[1:]))
+note("cwd", os.getcwd() + "\n")
+note("env", "".join("%s=%s\n" % (k, os.environ.get(k, "")) for k in ("WINEDEBUG", "UMU_ID", "LANG")))
+note("inherited", "SIGINT=%s\nSIGTERM=%s\n" % (inherited(signal.SIGINT), inherited(signal.SIGTERM)))
+
+received = []
+signal.signal(signal.SIGINT, lambda signum, frame: received.append(signum))
+
+with open("logs/enshrouded_server.log", "a", buffering=1) as log:
+    log.write("[Session] 'HostOnline' (up)!\n")
+    while not received:
+        time.sleep(0.1)
+    note("signal", signal.Signals(received[0]).name + "\n")
+    log.write("[Session] stop requested, saving the world...\n")
+    time.sleep(2)
+    with open("saved", "w") as f:
+        f.write("saved\n")
+    log.write("[Session] world saved, exiting\n")
+sys.exit(0)

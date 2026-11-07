@@ -30,11 +30,17 @@ mkdir -p ./logs; if [ ! -s ./enshrouded_server.exe ]; then echo "ERROR: the game
 Le banc de la PR lit la commande entre ces deux repères : la changer ici la fait
 retester.
 
-La commande de démarrage est **commune à tous les serveurs de l'egg**. Ajouter
-l'image en second choix demande donc soit une commande propre à chaque serveur
-passé sous Proton, soit une commande d'egg qui choisit Proton quand
-`PROTON_PATH` est défini et Wine sinon. C'est une étape à part, sur décision
-d'Arthur.
+### Avant d'ajouter l'image à l'egg
+
+Dans le panel, la commande de démarrage et l'image sont **copiées dans chaque
+serveur**. La plupart des serveurs Enshrouded gardent la commande de l'egg, et
+certains ont déjà une autre image (par exemple `ghcr.io/ptero-eggs/steamcmd:proton`).
+Le vrai risque est ailleurs : dès que cette image entre dans la liste de l'egg,
+un client peut la choisir en gardant la commande Wine, et son serveur s'arrête
+sur `wine: command not found`. L'étape suivante est donc une commande d'egg qui
+choisit Proton quand `PROTON_PATH` est défini (cette image) et Wine sinon, à
+essayer aussi avec les images déjà en place. Elle n'est pas dans ce dépôt :
+c'est une étape à part, sur décision d'Arthur.
 
 ## Ce que fait l'image
 
@@ -45,15 +51,38 @@ d'Arthur.
   `steamcmd/linux64/steamclient.so` et `linux32` dans `~/.steam/sdk64` et
   `sdk32` quand elle diffère, puis `eval` de `STARTUP`.
 - Variables de l'image : `PROTON_PATH=/opt/proton`, `GE_PROTON_VERSION=11-9`,
-  `UMU_ID=0`, `WINEDEBUG=-all`,
+  `UMU_ID=0`, `WINEDEBUG=-all`, `LANG=en_US.UTF-8`,
   `STEAM_COMPAT_CLIENT_INSTALL_PATH=/home/container/steamcmd`,
   `STEAM_COMPAT_DATA_PATH=/home/container/.steam/compatdata/2278520`.
 - Le préfixe Proton est dans `.steam/compatdata/2278520`, que le `.pteroignore`
-  de l'egg exclut déjà des sauvegardes (`.steam`). Le préfixe Wine (`.wine`)
-  n'est pas touché : il resservira tel quel en cas de retour à l'image Wine. Le
-  monde (`savegame`) et `enshrouded_server.json` sont les mêmes pour les deux
-  images.
+  de l'egg exclut des sauvegardes (`.steam`). Ce `.pteroignore` n'est écrit
+  qu'à l'installation, par le script de l'egg, depuis le 26/10/2026 : un serveur
+  installé avant n'en a pas, et sa sauvegarde contiendrait aussi le préfixe
+  Proton (en plus du jeu et de `.wine`, qu'elle contient déjà). Le préfixe Wine
+  (`.wine`) n'est pas touché : il resservira tel quel en cas de retour à l'image
+  Wine. Le monde (`savegame`) et `enshrouded_server.json` sont les mêmes pour
+  les deux images.
 - Utilisateur `container` (UID 988), `HOME=/home/container`. Aucun secret.
+
+## Arrêt du serveur
+
+L'arrêt `^C` de l'egg devient un arrêt Docker : Wings appelle `ContainerStop`
+sans fixer de signal ni de délai, et Docker envoie le `STOPSIGNAL` de l'image,
+**SIGINT** (comme `wine_latest` et `:dayz`), à tini, qui le relaie à tout le
+groupe de processus.
+
+Juste avant la commande de démarrage, l'entrypoint ignore SIGINT et SIGTERM
+(`trap '' INT TERM`). `tail` et le script `proton` en héritent, et ne meurent
+donc plus au signal. Wine, lui, installe toujours son propre gestionnaire de
+SIGINT et le transmet au jeu comme un Ctrl+C (`CTRL_C_EVENT`) : le jeu
+sauvegarde et s'arrête, `tail --pid` rend la main, et le conteneur s'arrête
+avec le code 0. Sans ce trap, `tail` et l'entrypoint mouraient aussitôt, tini
+(PID 1) sortait, et le noyau tuait le jeu pendant sa sauvegarde.
+
+Un jeu bloqué fait donc attendre l'arrêt, puisque Wings attend sans limite. Il
+reste le bouton « Kill » du panel (SIGKILL), qui ne laisse pas sauvegarder. La
+mise à jour SteamCMD du démarrage, qui passe avant le trap, reste
+interruptible.
 
 ## Prérequis du nœud
 
@@ -73,14 +102,29 @@ docker run --rm --network none --entrypoint python3 ghcr.io/ouiheberg/yolks:ensh
 - À la construction : empreinte SHA-512 de l'archive GE-Proton, ligne
   `lsteamclient=d` présente une seule fois avant le patch et absente après,
   script `proton` toujours lisible par Python.
+- Signal d'arrêt de l'image : `SIGINT` (`docker inspect`).
 - `tests/image-check.sh`, lancé **dans** l'image sans réseau : utilisateur 988,
-  variables, Proton (`proton`, `version`, `wine`, `wineserver`), patch,
-  `libvulkan.so.1`, entrypoint.
+  variables, Proton (`proton`, `version`, `wine`, `wineserver`,
+  `files/share/default_pfx`, pas de `steampipe_fixups.json`), patch, rien de
+  modifiable par l'UID 988, `libvulkan.so.1`, locale, entrypoint.
 - `tests/entrypoint-check.sh <image>`, lancé sur l'hôte sans réseau avec les
-  réglages de Wings (UID 988, racine en lecture seule, `/tmp` en tmpfs) : mise à
-  jour sautée avec `AUTO_UPDATE=0`, avertissement sans SteamCMD avec
-  `AUTO_UPDATE=1`, copie et mise à jour de `steamclient.so`, `eval` de la
-  commande ci-dessus, et sa garde quand le jeu manque.
+  réglages de Wings (UID 988, racine en lecture seule, `/tmp` en tmpfs) :
+  - mise à jour sautée avec `AUTO_UPDATE=0`, avertissement sans SteamCMD avec
+    `AUTO_UPDATE=1`, copie et mise à jour de `steamclient.so`, garde de la
+    commande quand le jeu manque ;
+  - la commande ci-dessus en entier avec un faux `proton`
+    (`tests/fake-proton`, par `PROTON_PATH`) : rotation du journal, arguments
+    (`run enshrouded_server.exe`, chemin relatif), `tail`, puis `docker stop` :
+    le faux jeu reçoit SIGINT, finit sa sauvegarde, et le conteneur sort avec
+    le code 0.
+- `tests/proton-stop-check.sh <image> <exe>` : la même chose sous le **vrai**
+  Proton de l'image, avec un programme console Windows (`tests/fake-game.c`,
+  compilé par mingw-w64 dans le banc) à la place du jeu. Le contrôle vérifie
+  trois choses :
+  - le programme est dans le groupe de processus de l'entrypoint ;
+  - Wine intercepte SIGINT dans ce processus ;
+  - `docker stop` lui envoie un Ctrl+C, il finit sa sauvegarde et le conteneur
+    sort avec le code 0.
 
 ## Retour arrière
 

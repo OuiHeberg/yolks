@@ -5,9 +5,15 @@
 # Workflow à part de steam.yml, sur le même modèle : une modification de cette
 # image ne republie ni :dayz ni :steam-installer.
 #
-# Sur une pull request : construction et contrôles sans réseau, RIEN n'est publié.
-# Sur main (push, lundi 04:00 UTC, à la main) : les mêmes contrôles, puis publication
-# du tag courant et d'un tag daté (retour arrière), puis tirage SANS identifiant.
+# Deux jobs :
+#  - « banc » : construction et contrôles sans réseau, avec un jeton en LECTURE
+#    seule (le code d'une pull request ne tourne jamais avec un jeton capable
+#    d'écrire le paquet) ;
+#  - « publication » : seulement sur main (push, lundi 04:00 UTC, à la main),
+#    après le banc. Il reconstruit l'image, refait les contrôles de l'image,
+#    publie le tag courant et un tag daté (retour arrière), puis tire l'image
+#    SANS identifiant et la recontrôle.
+# Actions épinglées par SHA (version en commentaire, mise à jour par dependabot).
 name: build enshrouded-proton
 on:
   workflow_dispatch:
@@ -25,10 +31,59 @@ on:
       - .github/workflows/enshrouded-proton.yml
 permissions:
   contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  enshrouded-proton:
-    name: "yolks:enshrouded-proton"
+  banc:
+    name: "yolks:enshrouded-proton (banc)"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      IMAGE: ghcr.io/ouiheberg/yolks
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Syntaxe des scripts
+        run: |
+          bash -n games/enshrouded-proton/entrypoint.sh
+          bash -n games/enshrouded-proton/tests/image-check.sh
+          bash -n games/enshrouded-proton/tests/entrypoint-check.sh
+          bash -n games/enshrouded-proton/tests/proton-stop-check.sh
+          python3 -I -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' games/enshrouded-proton/tests/fake-proton
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ./games/enshrouded-proton
+          platforms: linux/amd64
+          pull: true
+          load: true
+          push: false
+          tags: ${{ env.IMAGE }}:enshrouded-proton
+      - name: Signal d'arrêt de l'image (SIGINT, comme wine_latest et dayz)
+        run: docker inspect -f '{{.Config.StopSignal}}' "$IMAGE:enshrouded-proton" | grep -qx SIGINT
+      - name: Contrôle sans réseau de l'image (Proton, patch lsteamclient, UID 988, variables)
+        run: |
+          docker run --rm --network none -v "$PWD/games/enshrouded-proton/tests:/tests:ro" \
+            --entrypoint bash "$IMAGE:enshrouded-proton" /tests/image-check.sh
+      - name: Contrôle sans réseau de l'entrypoint et de la commande de démarrage, arrêt avec un faux proton (réglages de Wings)
+        run: bash games/enshrouded-proton/tests/entrypoint-check.sh "$IMAGE:enshrouded-proton"
+      - name: Compilation du faux jeu Windows (mingw-w64)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends gcc-mingw-w64-x86-64
+          x86_64-w64-mingw32-gcc -O2 -static -s -o "$RUNNER_TEMP/enshrouded_server.exe" games/enshrouded-proton/tests/fake-game.c
+      - name: Arrêt sous le vrai Proton, sans réseau (docker stop doit laisser le jeu sauvegarder)
+        timeout-minutes: 15
+        run: bash games/enshrouded-proton/tests/proton-stop-check.sh "$IMAGE:enshrouded-proton" "$RUNNER_TEMP/enshrouded_server.exe"
+
+  publication:
+    name: "yolks:enshrouded-proton (publication)"
+    needs: banc
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -36,17 +91,14 @@ jobs:
     env:
       IMAGE: ghcr.io/ouiheberg/yolks
     steps:
-      - uses: actions/checkout@v7
-      - name: Syntaxe des scripts
-        run: |
-          bash -n games/enshrouded-proton/entrypoint.sh
-          bash -n games/enshrouded-proton/tests/image-check.sh
-          bash -n games/enshrouded-proton/tests/entrypoint-check.sh
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - id: t
         name: Tag daté
         run: echo "dated=enshrouded-proton-$(date -u +%Y%m%d)-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/build-push-action@v7
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: ./games/enshrouded-proton
           platforms: linux/amd64
@@ -56,28 +108,25 @@ jobs:
           tags: |
             ${{ env.IMAGE }}:enshrouded-proton
             ${{ env.IMAGE }}:${{ steps.t.outputs.dated }}
-      - name: Contrôle sans réseau de l'image (Proton, patch lsteamclient, UID 988, variables)
+      - name: Contrôle de l'image avant publication (signal d'arrêt, image-check)
         run: |
+          docker inspect -f '{{.Config.StopSignal}}' "$IMAGE:enshrouded-proton" | grep -qx SIGINT
           docker run --rm --network none -v "$PWD/games/enshrouded-proton/tests:/tests:ro" \
             --entrypoint bash "$IMAGE:enshrouded-proton" /tests/image-check.sh
-      - name: Contrôle sans réseau de l'entrypoint et de la commande de démarrage (réglages de Wings)
-        run: bash games/enshrouded-proton/tests/entrypoint-check.sh "$IMAGE:enshrouded-proton"
-      - if: github.event_name != 'pull_request'
-        uses: docker/login-action@v4
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - if: github.event_name != 'pull_request'
-        name: Publication
+      - name: Publication
         run: |
           docker push "$IMAGE:enshrouded-proton"
           docker push "$IMAGE:${{ steps.t.outputs.dated }}"
-      - if: github.event_name != 'pull_request'
-        name: Tirage sans identifiant (paquet public) et contrôle de l'image publiée
+      - name: Tirage sans identifiant (paquet public) et contrôle de l'image publiée
         run: |
           docker logout ghcr.io
           docker image rm "$IMAGE:enshrouded-proton" "$IMAGE:${{ steps.t.outputs.dated }}"
           docker pull "$IMAGE:enshrouded-proton"
+          docker inspect -f '{{.Config.StopSignal}}' "$IMAGE:enshrouded-proton" | grep -qx SIGINT
           docker run --rm --network none -v "$PWD/games/enshrouded-proton/tests:/tests:ro" \
             --entrypoint bash "$IMAGE:enshrouded-proton" /tests/image-check.sh

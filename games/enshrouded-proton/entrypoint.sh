@@ -47,5 +47,15 @@ mkdir -p "${STEAM_COMPAT_DATA_PATH}"
 MODIFIED_STARTUP=$(echo ${STARTUP} | sed -e 's/{{/${/g' -e 's/}}/}/g')
 echo ":/home/container$ ${MODIFIED_STARTUP}"
 
+## Arrêt : Docker envoie SIGINT (STOPSIGNAL) à tini, qui le relaie à tout le
+## groupe de processus. Sans ce trap, `tail` et ce script mourraient aussitôt,
+## tini (PID 1) sortirait, et le noyau tuerait le jeu pendant sa sauvegarde.
+## Ignorés ici (et par tail et le script proton, qui en héritent), SIGINT et
+## SIGTERM n'arrêtent que le jeu : Wine remet son propre gestionnaire de SIGINT
+## et le transmet au jeu comme un Ctrl+C. Le conteneur s'arrête quand le jeu a
+## fini (tail --pid). Un jeu bloqué fait attendre l'arrêt : il reste le bouton
+## « Kill » du panel (SIGKILL). Posé APRÈS SteamCMD, qui reste interruptible.
+trap '' INT TERM
+
 # Run the Server
 eval ${MODIFIED_STARTUP}

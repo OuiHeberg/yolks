@@ -31,7 +31,15 @@
 #  - préfixe Proton dans .steam/compatdata/2278520 au lieu de .proton : le
 #    .pteroignore de l'egg exclut déjà .steam des sauvegardes (comme .wine) ;
 #  - steamclient.so recopié dans .steam/sdk64 et sdk32 quand SteamCMD le met à
-#    jour (voir entrypoint.sh).
+#    jour (voir entrypoint.sh) ;
+#  - STOPSIGNAL SIGINT, comme ptero-eggs/yolks:wine_latest et :dayz, et SIGINT
+#    et SIGTERM ignorés par l'entrypoint pendant que le jeu tourne (voir plus
+#    bas et entrypoint.sh) : l'arrêt laisse le jeu sauvegarder ;
+#  - LANG=en_US.UTF-8, la locale générée (l'image Wine ne la pose que dans
+#    /etc/default/locale, que le serveur ne lit pas ; le test du 07/11 tournait
+#    sans LANG) ;
+#  - pas d'architecture i386 : aucun paquet :i386 n'est installé (lib32gcc-s1,
+#    pour SteamCMD, est un paquet amd64).
 #
 # Aucun secret dans l'image. Mettre à jour GE-Proton : changer les deux ARG
 # (version, et empreinte SHA-512 lue dans le fichier
@@ -50,9 +58,12 @@ LABEL       org.opencontainers.image.description="Enshrouded sous GE-Proton 11-9
 ARG         GE_PROTON_VERSION=11-9
 ARG         GE_PROTON_SHA512=30160946a5e4ffdf1f29d6f83a3d27108f6aa71b6aa59095b2c2260fe3a003b62acf8fdcb02a3dfc602b28473f5679d8a3eaee5a8adb141c1dfa01c42888da2d
 
+## /etc/machine-id est créé à la construction (comme chez jsknnr), donc commun à
+## tous les conteneurs de l'image : sous Wings la racine est en lecture seule,
+## il ne peut pas être régénéré au démarrage, et libdbus, que Wine peut charger,
+## en a besoin. Le retirer n'est donc pas simple : il est gardé.
 ENV         DEBIAN_FRONTEND=noninteractive
-RUN         dpkg --add-architecture i386 \
-            && apt-get update \
+RUN         apt-get update \
             && apt-get upgrade -y \
             && apt-get install --no-install-recommends -y \
                 procps ca-certificates winbind dbus libfreetype6 libvulkan1 curl \
@@ -86,6 +97,7 @@ RUN         useradd -m -d /home/container -u 988 -s /bin/bash container
 USER        container
 ENV         USER=container \
             HOME=/home/container \
+            LANG=en_US.UTF-8 \
             GE_PROTON_VERSION=${GE_PROTON_VERSION} \
             PROTON_PATH=/opt/proton \
             UMU_ID=0 \
@@ -93,6 +105,13 @@ ENV         USER=container \
             STEAM_COMPAT_DATA_PATH=/home/container/.steam/compatdata/2278520 \
             WINEDEBUG=-all
 WORKDIR     /home/container
+
+## L'arrêt « ^C » de l'egg devient un arrêt Docker (ContainerStop de Wings, sans
+## signal fixé, sans délai) : Docker envoie STOPSIGNAL à tini, qui le relaie au
+## groupe de processus. Wine intercepte SIGINT et le transmet au jeu comme un
+## Ctrl+C (CTRL_C_EVENT), qui sauvegarde et s'arrête. SIGTERM, lui, n'a pas de
+## gestionnaire dans Wine.
+STOPSIGNAL  SIGINT
 
 COPY        --chmod=755 ./entrypoint.sh /entrypoint.sh
 ENTRYPOINT  ["/usr/bin/tini", "-g", "--"]

@@ -32,6 +32,8 @@ check "PROTON_PATH=/opt/proton" test "${P}" = /opt/proton
 check "GE_PROTON_VERSION=11-9" test "${GE_PROTON_VERSION:-}" = 11-9
 check "UMU_ID=0" test "${UMU_ID:-}" = 0
 check "WINEDEBUG=-all" test "${WINEDEBUG:-}" = -all
+check "LANG=en_US.UTF-8" test "${LANG:-}" = en_US.UTF-8
+check "locale en_US.UTF-8 générée" bash -c 'locale -a | grep -qix "en_US.utf8"'
 check "STEAM_COMPAT_CLIENT_INSTALL_PATH=/home/container/steamcmd" test "${STEAM_COMPAT_CLIENT_INSTALL_PATH:-}" = /home/container/steamcmd
 check "STEAM_COMPAT_DATA_PATH=/home/container/.steam/compatdata/2278520" test "${STEAM_COMPAT_DATA_PATH:-}" = /home/container/.steam/compatdata/2278520
 
@@ -39,6 +41,8 @@ check "proton : script présent et exécutable" test -x "${P}/proton"
 check "proton : version GE-Proton${GE_PROTON_VERSION:-}" grep -qx "[0-9]* GE-Proton${GE_PROTON_VERSION:-}" "${P}/version"
 check "proton : wine présent" test -x "${P}/files/bin/wine"
 check "proton : wineserver présent" test -x "${P}/files/bin/wineserver"
+check "proton : préfixe modèle présent (files/share/default_pfx)" test -d "${P}/files/share/default_pfx"
+check "proton : pas de steampipe_fixups.json (Proton écrirait dans /opt)" test ! -e "${P}/steampipe_fixups.json"
 check "proton : override lsteamclient=d absent" absent "lsteamclient=d" "${P}/proton"
 check "proton : la ligne patchée est devenue pass" patched "${P}/proton"
 check "proton : script lisible par Python" python3 -I -c 'import ast, sys; ast.parse(open(sys.argv[1]).read(), sys.argv[1])' "${P}/proton"
