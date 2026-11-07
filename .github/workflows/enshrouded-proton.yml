@@ -10,7 +10,8 @@
 #    seule (le code d'une pull request ne tourne jamais avec un jeton capable
 #    d'écrire le paquet) ;
 #  - « publication » : seulement sur main (push, lundi 04:00 UTC, à la main),
-#    après le banc. Il reconstruit l'image, refait les contrôles de l'image,
+#    après le banc. Un lancement à la main sur une autre branche ne fait que le
+#    banc. Il reconstruit l'image, refait les contrôles de l'image,
 #    publie le tag courant et un tag daté (retour arrière), puis tire l'image
 #    SANS identifiant et la recontrôle.
 # Actions épinglées par SHA (version en commentaire, mise à jour par dependabot).
@@ -83,7 +84,7 @@ jobs:
   publication:
     name: "yolks:enshrouded-proton (publication)"
     needs: banc
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: read
