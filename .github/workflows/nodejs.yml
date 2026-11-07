@@ -4,8 +4,9 @@
 # Sur une pull request, ou lancé à la main sur une autre branche que main : banc
 # seulement (construction et contrôle de la version de Node), sans aucun droit
 # d'écriture, RIEN n'est publié.
-# Sur main (push, lundi 03:00 UTC, lancement à la main sur main) : le même banc, puis
-# publication de l'image contrôlée, puis tirage et nouveau contrôle.
+# Sur main (push, lundi 03:00 UTC, lancement à la main sur main) : chaque version est
+# construite et contrôlée, puis publiée telle quelle, puis tirée sans identifiant et
+# contrôlée à nouveau. Une version en échec n'empêche pas la publication des autres.
 name: build nodejs
 on:
   workflow_dispatch:
@@ -24,6 +25,10 @@ on:
 permissions:
   contents: read
 
+env:
+  # Pas d'artefact .dockerbuild public (il contient le contenu de l'événement GitHub).
+  DOCKER_BUILD_RECORD_UPLOAD: false
+
 # Un seul run à la fois par branche : deux fusions rapprochées ne publient plus en
 # parallèle (un run plus lent ne peut plus republier une version plus ancienne).
 concurrency:
@@ -33,6 +38,9 @@ concurrency:
 jobs:
   banc:
     name: "banc nodejs_${{ matrix.tag }}"
+    # Hors main seulement : sur main, le job publication refait la même construction
+    # et le même contrôle avant de se connecter au registre.
+    if: github.event_name == 'pull_request' || github.ref != 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -65,11 +73,10 @@ jobs:
           provenance: false
           tags: banc/nodejs:${{ matrix.tag }}
       - name: Contrôle de la version de Node
-        run: docker run --rm --entrypoint node "banc/nodejs:${{ matrix.tag }}" --version | grep -x "v${{ steps.v.outputs.node }}"
+        run: docker run --rm --pull=never --entrypoint node "banc/nodejs:${{ matrix.tag }}" --version | grep -x "v${{ steps.v.outputs.node }}"
 
   publication:
     name: "yolks:nodejs_${{ matrix.tag }}"
-    needs: banc
     # Jamais sur une pull request, jamais depuis une autre branche que main.
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
@@ -111,7 +118,7 @@ jobs:
             ${{ env.IMAGE }}:nodejs_${{ matrix.tag }}
             ${{ env.IMAGE }}:nodejs_${{ matrix.tag }}-${{ steps.v.outputs.node }}
       - name: Contrôle de la version de Node avant publication
-        run: docker run --rm --entrypoint node "$IMAGE:nodejs_${{ matrix.tag }}" --version | grep -x "v${{ steps.v.outputs.node }}"
+        run: docker run --rm --pull=never --entrypoint node "$IMAGE:nodejs_${{ matrix.tag }}" --version | grep -x "v${{ steps.v.outputs.node }}"
       - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
@@ -121,8 +128,11 @@ jobs:
         run: |
           docker push "$IMAGE:nodejs_${{ matrix.tag }}-${{ steps.v.outputs.node }}"
           docker push "$IMAGE:nodejs_${{ matrix.tag }}"
-      - name: Contrôle de la version publiée
+      - name: Contrôle de la version publiée, tirée sans identifiant comme sur les nœuds
         run: |
+          docker logout ghcr.io
           docker image rm "$IMAGE:nodejs_${{ matrix.tag }}" "$IMAGE:nodejs_${{ matrix.tag }}-${{ steps.v.outputs.node }}"
-          docker pull "$IMAGE:nodejs_${{ matrix.tag }}"
-          docker run --rm --entrypoint node "$IMAGE:nodejs_${{ matrix.tag }}" --version | grep -x "v${{ steps.v.outputs.node }}"
+          for t in "nodejs_${{ matrix.tag }}" "nodejs_${{ matrix.tag }}-${{ steps.v.outputs.node }}"; do
+            docker pull "$IMAGE:$t"
+            docker run --rm --pull=never --entrypoint node "$IMAGE:$t" --version | grep -x "v${{ steps.v.outputs.node }}"
+          done

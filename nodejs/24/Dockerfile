@@ -2,7 +2,7 @@ FROM        --platform=$TARGETOS/$TARGETARCH node:24.22.2-trixie-slim
 
 LABEL       author="Michael Parker" maintainer="OuiHeberg <contact@ouiheberg.com>" \
             org.opencontainers.image.source="https://github.com/OuiHeberg/yolks" \
-            org.opencontainers.image.description="Yolk Node.js 24 (Dockerfile pelican-eggs/yolks@9db46b2, base node:24.22.1-trixie-slim)"
+            org.opencontainers.image.description="Yolk Node.js 24 (Dockerfile pelican-eggs/yolks@9db46b2, base node:24.22.2-trixie-slim)"
 
 # add container user and set stop signal
 RUN         useradd -m -d /home/container container
