@@ -4,12 +4,16 @@ Image d'exécution des serveurs Enshrouded sous **GE-Proton 11-9**, avec fsync.
 Prévue en second choix de l'egg Enshrouded **8034**, qui tourne aujourd'hui sous
 `ghcr.io/ptero-eggs/yolks:wine_latest` (Wine stable, sans esync, fsync ni ntsync).
 
-Construite et publiée par `.github/workflows/enshrouded-proton.yml` :
+Construite et publiée par `.github/workflows/enshrouded-proton.yml`, seulement
+depuis `main`. Avant de publier, le workflow rejoue sur l'image à publier tous
+les contrôles du banc (voir « Contrôles »). Il pousse le tag daté, puis le tag
+courant, vérifie que les deux mènent au digest poussé, et tire l'image par ce
+digest, sans identifiant, pour la recontrôler.
 
 | Tag | Rôle |
 | --- | --- |
 | `ghcr.io/ouiheberg/yolks:enshrouded-proton` | tag courant, à mettre dans l'egg |
-| `ghcr.io/ouiheberg/yolks:enshrouded-proton-AAAAMMJJ-sha7` | tag daté de chaque publication, pour le retour arrière |
+| `ghcr.io/ouiheberg/yolks:enshrouded-proton-AAAAMMJJ-sha7-run` | tag daté de chaque publication, pour le retour arrière (`run` : numéro du run GitHub Actions, pour qu'une autre publication du même jour et du même commit ne l'écrase pas) |
 
 ## Commande de démarrage de l'egg pour cette image
 
@@ -146,5 +150,5 @@ docker run --rm --network none --entrypoint python3 ghcr.io/ouiheberg/yolks:ensh
 - Pour un serveur : remettre l'image `ghcr.io/ptero-eggs/yolks:wine_latest` et
   la commande Wine de l'egg. Le monde et `.wine` sont restés en place.
 - Pour l'image : mettre dans l'egg un tag daté précédent
-  (`enshrouded-proton-AAAAMMJJ-sha7`), ou annuler le commit fautif sur `main`
+  (`enshrouded-proton-AAAAMMJJ-sha7-run`), ou annuler le commit fautif sur `main`
   (le workflow republie alors le tag courant).
