@@ -188,6 +188,7 @@ expect "code de sortie 0 (arrêt demandé pendant la mise à jour, pas tué)" te
 expect "arrêt en moins de 30 s" test "$((t1 - t0))" -lt 30
 expect "SteamCMD a reçu SIGINT" same "${vol4}/steamcmd/signal" SIGINT
 expect "message : arrêt demandé pendant la mise à jour" grep -qF "Stop requested during the startup update" "${out}"
+expect "commande de démarrage non affichée" bash -c '! grep -qF ":/home/container\$ " "$1"' _ "${out}"
 expect "jeu non lancé (faux proton jamais appelé)" test ! -e "${vol4}/fakeproton/args"
 expect "commande de démarrage non exécutée (pas de dossier logs)" test ! -e "${vol4}/logs"
 

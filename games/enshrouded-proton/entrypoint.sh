@@ -50,27 +50,28 @@ for a in 64 32; do
 done
 mkdir -p "${STEAM_COMPAT_DATA_PATH}"
 
-# Replace Startup Variables
-MODIFIED_STARTUP=$(echo ${STARTUP} | sed -e 's/{{/${/g' -e 's/}}/}/g')
-echo ":/home/container$ ${MODIFIED_STARTUP}"
-
 ## Arrêt : Docker envoie SIGINT (STOPSIGNAL) à tini, qui le relaie à tout le
 ## groupe de processus. Sans ce trap, `tail` et ce script mourraient aussitôt,
 ## tini (PID 1) sortirait, et le noyau tuerait le jeu pendant sa sauvegarde.
 ## Ignorés ici (et par tail et le script proton, qui en héritent), SIGINT et
 ## SIGTERM n'arrêtent que le jeu : Wine remet son propre gestionnaire de SIGINT
 ## et le transmet au jeu comme un Ctrl+C. Le conteneur s'arrête quand le jeu a
-## fini (tail --pid). Un jeu bloqué fait attendre l'arrêt : Wings le tue
-## (SIGKILL) au bout de 10 minutes, et le bouton « Kill » du panel le fait tout
-## de suite. Posé APRÈS SteamCMD, qui reste interruptible.
-## Le contrôle de l'arrêt noté vient juste après : un signal reçu avant le trap
-## est vu ici, un signal reçu après est ignoré (voir README.md, « Arrêt du
-## serveur »).
+## fini (tail --pid). Un jeu bloqué fait attendre l'arrêt : pour un « Stop »,
+## Wings le tue (SIGKILL) au bout de 10 minutes, et le bouton « Kill » du panel
+## le fait tout de suite (autres délais : README.md, « Arrêt du serveur »).
+## Posé APRÈS SteamCMD, qui reste interruptible.
+## Le contrôle de l'arrêt noté vient juste après, avant même l'affichage de la
+## commande : un signal reçu avant le trap est vu ici, et la commande n'est ni
+## affichée ni lancée ; un signal reçu après est ignoré.
 trap '' INT TERM
 if [ -n "${stop}" ]; then
     echo "Stop requested during the startup update: the game server is not started."
     exit 0
 fi
+
+# Replace Startup Variables
+MODIFIED_STARTUP=$(echo ${STARTUP} | sed -e 's/{{/${/g' -e 's/}}/}/g')
+echo ":/home/container$ ${MODIFIED_STARTUP}"
 
 # Run the Server
 eval ${MODIFIED_STARTUP}
