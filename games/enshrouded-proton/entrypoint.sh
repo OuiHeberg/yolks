@@ -12,6 +12,13 @@ echo "Running on Debian $(cat /etc/debian_version), Proton $(cut -d' ' -f2 "${PR
 INTERNAL_IP=$(ip route get 1 2>/dev/null | awk '{print $(NF-2);exit}')
 export INTERNAL_IP
 
+## Un arrêt (SIGINT ou SIGTERM) reçu d'ici au lancement du jeu est noté, puis
+## respecté juste avant la commande de démarrage : sans cela, un SteamCMD qui
+## intercepte SIGINT et sort en 0 laissait le script lancer le jeu, et l'arrêt
+## demandé pendant la mise à jour était perdu.
+stop=
+trap 'stop=1' INT TERM
+
 ## Mise à jour du jeu par le SteamCMD du volume (posé par le script
 ## d'installation de l'egg), en anonyme, si AUTO_UPDATE est vide ou vaut 1.
 ## VALIDATE non vide : validation des fichiers (comme l'image Wine).
@@ -53,9 +60,17 @@ echo ":/home/container$ ${MODIFIED_STARTUP}"
 ## Ignorés ici (et par tail et le script proton, qui en héritent), SIGINT et
 ## SIGTERM n'arrêtent que le jeu : Wine remet son propre gestionnaire de SIGINT
 ## et le transmet au jeu comme un Ctrl+C. Le conteneur s'arrête quand le jeu a
-## fini (tail --pid). Un jeu bloqué fait attendre l'arrêt : il reste le bouton
-## « Kill » du panel (SIGKILL). Posé APRÈS SteamCMD, qui reste interruptible.
+## fini (tail --pid). Un jeu bloqué fait attendre l'arrêt : Wings le tue
+## (SIGKILL) au bout de 10 minutes, et le bouton « Kill » du panel le fait tout
+## de suite. Posé APRÈS SteamCMD, qui reste interruptible.
+## Le contrôle de l'arrêt noté vient juste après : un signal reçu avant le trap
+## est vu ici, un signal reçu après est ignoré (voir README.md, « Arrêt du
+## serveur »).
 trap '' INT TERM
+if [ -n "${stop}" ]; then
+    echo "Stop requested during the startup update: the game server is not started."
+    exit 0
+fi
 
 # Run the Server
 eval ${MODIFIED_STARTUP}

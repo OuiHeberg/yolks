@@ -7,6 +7,8 @@
 #  3.   Faux jeu, et faux proton (tests/fake-proton) par PROTON_PATH : la
 #       commande du README tourne en entier (rotation du journal, arguments de
 #       proton, tail), puis `docker stop` doit laisser le jeu « sauvegarder ».
+#  4.   Faux SteamCMD qui intercepte SIGINT et sort en 0 : `docker stop`
+#       pendant la mise à jour doit arrêter le conteneur sans lancer le jeu.
 #   bash games/enshrouded-proton/tests/entrypoint-check.sh ghcr.io/ouiheberg/yolks:enshrouded-proton
 set -euo pipefail
 
@@ -143,6 +145,51 @@ expect "rotation : .log.1 -> .log.2" same "${vol3}/logs/enshrouded_server.log.2"
 expect "rotation : .log.2 -> .log.3 (l'ancien .log.3 est remplacé)" same "${vol3}/logs/enshrouded_server.log.3" "journal 2"
 expect "pas de .log.4" test ! -e "${vol3}/logs/enshrouded_server.log.4"
 expect "tail : la ligne HostOnline du journal est dans la console" grep -qF "'HostOnline' (up)!" "${out}"
+
+echo "== 4. docker stop pendant la mise à jour SteamCMD"
+new_volume vol4
+mkdir -p "${vol4}/steamcmd" "${vol4}/fakeproton"
+cp "${here}/fake-proton" "${vol4}/fakeproton/proton"
+echo "0 faux-proton" > "${vol4}/fakeproton/version"
+echo "MZ faux jeu" > "${vol4}/enshrouded_server.exe"
+# Faux SteamCMD : il note ses arguments, attend, et à SIGINT finit en 1 s puis
+# sort en 0, comme un SteamCMD qui s'arrête proprement. Sans le contrôle de
+# l'entrypoint, le jeu serait lancé juste après.
+cat > "${vol4}/steamcmd/steamcmd.sh" <<'EOF'
+#!/bin/bash
+trap 'echo SIGINT > ./steamcmd/signal; sleep 1; exit 0' INT
+echo "$*" > ./steamcmd/args
+while :; do sleep 0.1; done
+EOF
+chmod -R a+rwX "${vol4}"
+chmod 755 "${vol4}/steamcmd/steamcmd.sh" "${vol4}/fakeproton/proton"
+
+docker run -d -t -i --name "${name}" "${wings[@]}" -v "${vol4}:/home/container" \
+    -e TZ=Europe/Paris -e AUTO_UPDATE=1 -e SRCDS_APPID=2278520 -e WINDOWS_INSTALL=1 \
+    -e PROTON_PATH=/home/container/fakeproton -e STARTUP="${startup}" \
+    "${IMAGE}" >/dev/null
+started=0
+for _ in $(seq 1 60); do
+    if [ -s "${vol4}/steamcmd/args" ]; then started=1; break; fi
+    [ "$(docker inspect -f '{{.State.Running}}' "${name}")" = true ] || break
+    sleep 0.5
+done
+expect "faux SteamCMD lancé (AUTO_UPDATE=1)" test "${started}" = 1
+expect "SteamCMD : app_update 2278520, plateforme windows" grep -qF "+@sSteamCmdForcePlatformType windows +app_update 2278520 +quit" "${vol4}/steamcmd/args"
+t0=$(date +%s)
+docker stop -t 30 "${name}" >/dev/null
+t1=$(date +%s)
+code=$(docker inspect -f '{{.State.ExitCode}}' "${name}")
+docker logs "${name}" > "${out}" 2>&1 || true
+docker rm -f "${name}" >/dev/null 2>&1 || true
+tr -d '\r' < "${out}" | sed 's/^/    | /'
+echo "    (arrêt en $((t1 - t0)) s, code de sortie ${code})"
+expect "code de sortie 0 (arrêt demandé pendant la mise à jour, pas tué)" test "${code}" = 0
+expect "arrêt en moins de 30 s" test "$((t1 - t0))" -lt 30
+expect "SteamCMD a reçu SIGINT" same "${vol4}/steamcmd/signal" SIGINT
+expect "message : arrêt demandé pendant la mise à jour" grep -qF "Stop requested during the startup update" "${out}"
+expect "jeu non lancé (faux proton jamais appelé)" test ! -e "${vol4}/fakeproton/args"
+expect "commande de démarrage non exécutée (pas de dossier logs)" test ! -e "${vol4}/logs"
 
 if [ "${fail}" -ne 0 ]; then
     echo "Des contrôles de l'entrypoint ont échoué."

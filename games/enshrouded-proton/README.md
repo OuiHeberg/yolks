@@ -119,6 +119,8 @@ docker run --rm --network none --entrypoint python3 ghcr.io/ouiheberg/yolks:ensh
     (`run enshrouded_server.exe`, chemin relatif), `tail`, puis `docker stop` :
     le faux jeu reçoit SIGINT, finit sa sauvegarde, et le conteneur sort sans
     être tué (code inférieur à 128).
+  - `docker stop` pendant la mise à jour, avec un faux SteamCMD qui intercepte
+    SIGINT et sort en 0 : le conteneur sort en 0 sans lancer le jeu.
 - `tests/proton-stop-check.sh <image> <exe>` : la même chose sous le **vrai**
   Proton de l'image, avec un programme console Windows (`tests/fake-game.c`,
   compilé par mingw-w64 dans le banc) à la place du jeu. Le contrôle vérifie
