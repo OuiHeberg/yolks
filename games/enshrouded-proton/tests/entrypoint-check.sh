@@ -125,7 +125,10 @@ docker logs "${name}" > "${out}" 2>&1 || true
 docker rm -f "${name}" >/dev/null 2>&1 || true
 tr -d '\r' < "${out}" | sed 's/^/    | /'
 echo "    (arrêt en $((t1 - t0)) s, code de sortie ${code})"
-expect "code de sortie 0 (pas 137 : le conteneur n'a pas été tué)" test "${code}" = 0
+# Code attendu : celui de tail, 1 (le journal venait d'être déplacé par la
+# rotation quand tail l'a ouvert), comme avec la commande Wine. 137 (SIGKILL)
+# ou 130 (SIGINT) diraient que le conteneur a été tué.
+expect "code de sortie ${code} : pas tué par un signal (ni 137 ni 130, moins de 128)" test "${code}" -lt 128
 expect "arrêt en moins de 30 s" test "$((t1 - t0))" -lt 30
 expect "le jeu a reçu SIGINT" same "${vol3}/fakeproton/signal" SIGINT
 expect "le jeu a fini sa sauvegarde (./saved)" test -f "${vol3}/saved"

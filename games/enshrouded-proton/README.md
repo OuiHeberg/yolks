@@ -76,7 +76,9 @@ Juste avant la commande de démarrage, l'entrypoint ignore SIGINT et SIGTERM
 donc plus au signal. Wine, lui, installe toujours son propre gestionnaire de
 SIGINT et le transmet au jeu comme un Ctrl+C (`CTRL_C_EVENT`) : le jeu
 sauvegarde et s'arrête, `tail --pid` rend la main, et le conteneur s'arrête
-avec le code 0. Sans ce trap, `tail` et l'entrypoint mouraient aussitôt, tini
+sans être tué. Son code de sortie est 1 : c'est celui de `tail`, qui n'a pas
+trouvé le journal à son lancement (la rotation venait de le déplacer), comme
+avec la commande Wine. Sans ce trap, `tail` et l'entrypoint mouraient aussitôt, tini
 (PID 1) sortait, et le noyau tuait le jeu pendant sa sauvegarde.
 
 Un jeu bloqué fait donc attendre l'arrêt, puisque Wings attend sans limite. Il
@@ -115,8 +117,8 @@ docker run --rm --network none --entrypoint python3 ghcr.io/ouiheberg/yolks:ensh
   - la commande ci-dessus en entier avec un faux `proton`
     (`tests/fake-proton`, par `PROTON_PATH`) : rotation du journal, arguments
     (`run enshrouded_server.exe`, chemin relatif), `tail`, puis `docker stop` :
-    le faux jeu reçoit SIGINT, finit sa sauvegarde, et le conteneur sort avec
-    le code 0.
+    le faux jeu reçoit SIGINT, finit sa sauvegarde, et le conteneur sort sans
+    être tué (code inférieur à 128).
 - `tests/proton-stop-check.sh <image> <exe>` : la même chose sous le **vrai**
   Proton de l'image, avec un programme console Windows (`tests/fake-game.c`,
   compilé par mingw-w64 dans le banc) à la place du jeu. Le contrôle vérifie
@@ -124,7 +126,7 @@ docker run --rm --network none --entrypoint python3 ghcr.io/ouiheberg/yolks:ensh
   - le programme est dans le groupe de processus de l'entrypoint ;
   - Wine intercepte SIGINT dans ce processus ;
   - `docker stop` lui envoie un Ctrl+C, il finit sa sauvegarde et le conteneur
-    sort avec le code 0.
+    sort sans être tué.
 
 ## Retour arrière
 
