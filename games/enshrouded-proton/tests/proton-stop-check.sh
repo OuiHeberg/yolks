@@ -3,7 +3,7 @@
 # RÉSEAU, avec les réglages de Wings (UID 988, racine en lecture seule, /tmp en
 # tmpfs, tty) et la commande de démarrage de README.md. Le jeu est remplacé par
 # tests/fake-game.c, compilé pour Windows : un programme console qui écrit
-# « HostOnline » puis attend, et qui à un Ctrl+C « sauvegarde » 2 s et sort.
+# « HostOnline » puis attend, et qui à un Ctrl+C « sauvegarde » 8 s et sort.
 # Vérifie que `docker stop` (SIGINT) atteint le programme Windows à travers tini,
 # bash, le script proton et Wine, et que le conteneur s'arrête seul.
 #   x86_64-w64-mingw32-gcc -O2 -static -s -o /tmp/enshrouded_server.exe games/enshrouded-proton/tests/fake-game.c
@@ -81,8 +81,12 @@ t1=$(date +%s)
 code=$(docker inspect -f '{{.State.ExitCode}}' "${name}")
 docker logs "${name}" 2>&1 | tr -d '\r' | tail -n 30 | sed 's/^/    | /' || true
 echo "    (arrêt en $((t1 - t0)) s, code de sortie ${code})"
-expect "le jeu a reçu un Ctrl+C (CTRL_C_EVENT = 0)" test "$(cat "${vol}/ctrl-event" 2>/dev/null)" = 0
-expect "le jeu a fini sa sauvegarde (./saved)" test -f "${vol}/saved"
+echo "    événements console reçus par le jeu (type, ms depuis son lancement) :"
+tr -d '\r' < "${vol}/ctrl-events" 2>/dev/null | sed 's/^/    | /' || echo "    | (aucun)"
+first_event=$(tr -d '\r' < "${vol}/ctrl-events" 2>/dev/null | awk 'NR == 1 {print $1}')
+expect "premier événement reçu par le jeu : Ctrl+C (CTRL_C_EVENT = 0)" test "${first_event}" = 0
+expect "le jeu a fini sa sauvegarde de 8 s (./saved)" test -f "${vol}/saved"
+expect "l'arrêt a attendu la sauvegarde (8 s ou plus)" test "$((t1 - t0))" -ge 8
 # Code attendu : celui de tail, 1 (le journal venait d'être déplacé par la
 # rotation quand tail l'a ouvert), comme avec la commande Wine. 137 (SIGKILL)
 # ou 130 (SIGINT) diraient que le conteneur a été tué.
