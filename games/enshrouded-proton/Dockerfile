@@ -65,12 +65,15 @@ RUN         dpkg --add-architecture i386 \
 
 ## GE-Proton : archive vérifiée, puis patch lsteamclient. Les deux contrôles
 ## (ligne présente une seule fois avant, absente après) font échouer la
-## construction si le script proton a changé.
+## construction si le script proton a changé. L'archive 11-9 livre 15 fichiers
+## en 0666 (files/share/xalia) : l'écriture est retirée au groupe et aux autres,
+## pour que rien dans Proton ne soit modifiable par l'utilisateur du serveur.
 RUN         curl -fsSL -o /tmp/ge.tar.gz \
                 "https://github.com/GloriousEggroll/proton-ge-custom/releases/download/GE-Proton${GE_PROTON_VERSION}/GE-Proton${GE_PROTON_VERSION}-x86_64.tar.gz" \
             && echo "${GE_PROTON_SHA512}  /tmp/ge.tar.gz" | sha512sum -c - \
             && tar xzf /tmp/ge.tar.gz --no-same-owner -C /opt && rm -f /tmp/ge.tar.gz \
             && mv "/opt/GE-Proton${GE_PROTON_VERSION}-x86_64" "/opt/GE-Proton${GE_PROTON_VERSION}" \
+            && chmod -R go-w "/opt/GE-Proton${GE_PROTON_VERSION}" \
             && test "$(grep -cF 'append_to_env_str(self.env, "WINEDLLOVERRIDES", "lsteamclient=d", ";")' "/opt/GE-Proton${GE_PROTON_VERSION}/proton")" = 1 \
             && sed -i 's/append_to_env_str(self.env, "WINEDLLOVERRIDES", "lsteamclient=d", ";")/pass/' "/opt/GE-Proton${GE_PROTON_VERSION}/proton" \
             && ! grep -q "lsteamclient=d" "/opt/GE-Proton${GE_PROTON_VERSION}/proton" \
