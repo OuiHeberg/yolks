@@ -40,6 +40,8 @@ jobs:
       IMAGE: ghcr.io/ouiheberg/yolks
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Banc de oh-steam-install (doublures, sans réseau ni compte Steam)
         run: bash steam-installer/tests/oh-steam-install.test.sh
       - id: t
@@ -62,18 +64,18 @@ jobs:
         run: |
           docker run --rm --network none --entrypoint bash "$IMAGE:steam-installer" -c \
             'sed "s/^FIXTURE=.*/FIXTURE=\"\"/" /usr/local/bin/oh-steam-selftest > /tmp/neg && ! bash /tmp/neg'
-      - if: github.event_name != 'pull_request'
+      - if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - if: github.event_name != 'pull_request'
+      - if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         name: Publication
         run: |
           docker push "$IMAGE:steam-installer"
           docker push "$IMAGE:${{ steps.t.outputs.dated }}"
-      - if: github.event_name != 'pull_request'
+      - if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         name: Tirage sans identifiant (paquet public) et selftest de l'image publiée
         run: |
           docker logout ghcr.io
@@ -91,6 +93,8 @@ jobs:
       IMAGE: ghcr.io/ouiheberg/yolks
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - id: t
         name: Tag daté
         run: echo "dated=dayz-$(date -u +%Y%m%d)-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
@@ -119,18 +123,18 @@ jobs:
             [ "$HOME" = /home/container ]
             [ "$(pwd)" = /home/container ]
             echo "OK : image dayz"'
-      - if: github.event_name != 'pull_request'
+      - if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - if: github.event_name != 'pull_request'
+      - if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         name: Publication
         run: |
           docker push "$IMAGE:dayz"
           docker push "$IMAGE:${{ steps.t.outputs.dated }}"
-      - if: github.event_name != 'pull_request'
+      - if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         name: Tirage sans identifiant (paquet public)
         run: |
           docker logout ghcr.io

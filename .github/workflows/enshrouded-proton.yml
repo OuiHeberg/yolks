@@ -1,0 +1,193 @@
+# Image d'exécution Enshrouded sous GE-Proton des serveurs OuiPanel :
+#  - ghcr.io/ouiheberg/yolks:enshrouded-proton (games/enshrouded-proton), prévue
+#    en second choix de l'egg Enshrouded 8034, qui tourne aujourd'hui sous
+#    ghcr.io/ptero-eggs/yolks:wine_latest.
+# Workflow à part de steam.yml, sur le même modèle : une modification de cette
+# image ne republie ni :dayz ni :steam-installer.
+#
+# Deux jobs :
+#  - « banc » : construction et contrôles sans réseau, avec un jeton en LECTURE
+#    seule (le code d'une pull request ne tourne jamais avec un jeton capable
+#    d'écrire le paquet) ;
+#  - « publication » : seulement sur main (push, lundi 04:00 UTC, à la main),
+#    après le banc. Un lancement à la main sur une autre branche ne fait que le
+#    banc. Il reconstruit l'image et rejoue TOUS les contrôles du banc sur
+#    l'image qu'il va publier, avant de se connecter au registre. Il publie le
+#    tag daté (retour arrière, avec le numéro du run et de la tentative :
+#    jamais écrasé par un autre run ni par une relance), puis le tag courant.
+#    Il relève le digest publié, vérifie que les deux tags du registre y
+#    mènent, tire l'image PAR CE DIGEST et SANS identifiant, vérifie que c'est
+#    bien l'image contrôlée, et la recontrôle.
+# Pas d'attestation de provenance (provenance: false) : elle embarquerait les
+# détails de l'événement qui a lancé le run.
+# Actions épinglées par SHA (version en commentaire, mise à jour par dependabot).
+name: build enshrouded-proton
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 4 * * 1"   # chaque lundi 04:00 UTC : mises à jour Debian de la base
+  pull_request:
+    paths:
+      - games/enshrouded-proton/**
+      - .github/workflows/enshrouded-proton.yml
+  push:
+    branches:
+      - main
+    paths:
+      - games/enshrouded-proton/**
+      - .github/workflows/enshrouded-proton.yml
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  banc:
+    name: "yolks:enshrouded-proton (banc)"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      IMAGE: ghcr.io/ouiheberg/yolks
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Syntaxe des scripts
+        run: |
+          bash -n games/enshrouded-proton/entrypoint.sh
+          bash -n games/enshrouded-proton/tests/image-check.sh
+          bash -n games/enshrouded-proton/tests/entrypoint-check.sh
+          bash -n games/enshrouded-proton/tests/proton-stop-check.sh
+          python3 -I -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' games/enshrouded-proton/tests/fake-proton
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ./games/enshrouded-proton
+          platforms: linux/amd64
+          pull: true
+          load: true
+          push: false
+          provenance: false
+          tags: ${{ env.IMAGE }}:enshrouded-proton
+      - name: Signal d'arrêt de l'image (SIGINT, comme wine_latest et dayz)
+        run: docker inspect -f '{{.Config.StopSignal}}' "$IMAGE:enshrouded-proton" | grep -qx SIGINT
+      - name: Contrôle sans réseau de l'image (Proton, patch lsteamclient, UID 988, variables)
+        run: |
+          docker run --rm --network none -v "$PWD/games/enshrouded-proton/tests:/tests:ro" \
+            --entrypoint bash "$IMAGE:enshrouded-proton" /tests/image-check.sh
+      - name: Contrôle sans réseau de l'entrypoint et de la commande de démarrage, arrêt avec un faux proton (réglages de Wings)
+        run: bash games/enshrouded-proton/tests/entrypoint-check.sh "$IMAGE:enshrouded-proton"
+      - name: Compilation du faux jeu Windows (mingw-w64)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends gcc-mingw-w64-x86-64
+          x86_64-w64-mingw32-gcc -O2 -static -s -o "$RUNNER_TEMP/enshrouded_server.exe" games/enshrouded-proton/tests/fake-game.c
+      - name: Arrêt sous le vrai Proton, sans réseau (docker stop doit laisser le jeu sauvegarder)
+        timeout-minutes: 15
+        run: bash games/enshrouded-proton/tests/proton-stop-check.sh "$IMAGE:enshrouded-proton" "$RUNNER_TEMP/enshrouded_server.exe"
+
+  publication:
+    name: "yolks:enshrouded-proton (publication)"
+    needs: banc
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/ouiheberg/yolks
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: t
+        name: Tag daté (date, commit, numéro du run et de la tentative)
+        run: echo "dated=enshrouded-proton-$(date -u +%Y%m%d)-${GITHUB_SHA::7}-${{ github.run_id }}-${{ github.run_attempt }}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ./games/enshrouded-proton
+          platforms: linux/amd64
+          pull: true
+          load: true
+          push: false
+          provenance: false
+          tags: |
+            ${{ env.IMAGE }}:enshrouded-proton
+            ${{ env.IMAGE }}:${{ steps.t.outputs.dated }}
+      # Les contrôles du banc, rejoués sur l'image qui va être publiée (elle est
+      # reconstruite ici : ce n'est pas celle du job banc), avant la connexion
+      # au registre.
+      - name: Contrôle de l'image avant publication (signal d'arrêt, image-check)
+        run: |
+          docker inspect -f '{{.Config.StopSignal}}' "$IMAGE:enshrouded-proton" | grep -qx SIGINT
+          docker run --rm --network none -v "$PWD/games/enshrouded-proton/tests:/tests:ro" \
+            --entrypoint bash "$IMAGE:enshrouded-proton" /tests/image-check.sh
+      - name: Contrôle de l'entrypoint et de la commande de démarrage avant publication (faux proton, faux SteamCMD)
+        run: bash games/enshrouded-proton/tests/entrypoint-check.sh "$IMAGE:enshrouded-proton"
+      - name: Compilation du faux jeu Windows (mingw-w64)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends gcc-mingw-w64-x86-64
+          x86_64-w64-mingw32-gcc -O2 -static -s -o "$RUNNER_TEMP/enshrouded_server.exe" games/enshrouded-proton/tests/fake-game.c
+      - name: Arrêt sous le vrai Proton avant publication, sans réseau
+        timeout-minutes: 15
+        run: bash games/enshrouded-proton/tests/proton-stop-check.sh "$IMAGE:enshrouded-proton" "$RUNNER_TEMP/enshrouded_server.exe"
+      - id: tested
+        name: Identifiant de l'image contrôlée
+        env:
+          DATED: ${{ steps.t.outputs.dated }}
+        run: |
+          set -euo pipefail
+          id=$(docker image inspect -f '{{.Id}}' "$IMAGE:enshrouded-proton")
+          test "$(docker image inspect -f '{{.Id}}' "$IMAGE:$DATED")" = "$id"
+          echo "image contrôlée : $id"
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: push
+        name: Publication (tag daté d'abord, puis tag courant) et digest publié
+        env:
+          DATED: ${{ steps.t.outputs.dated }}
+        run: |
+          set -euo pipefail
+          docker push "$IMAGE:$DATED" | tee "$RUNNER_TEMP/push-dated.log"
+          docker push "$IMAGE:enshrouded-proton" | tee "$RUNNER_TEMP/push-current.log"
+          d_dated=$(grep -oE 'digest: sha256:[0-9a-f]{64}' "$RUNNER_TEMP/push-dated.log" | tail -n 1 | cut -d' ' -f2) \
+            || { echo "digest introuvable dans la sortie de docker push (tag daté)"; exit 1; }
+          d_current=$(grep -oE 'digest: sha256:[0-9a-f]{64}' "$RUNNER_TEMP/push-current.log" | tail -n 1 | cut -d' ' -f2) \
+            || { echo "digest introuvable dans la sortie de docker push (tag courant)"; exit 1; }
+          echo "digest publié : tag daté $d_dated, tag courant $d_current"
+          test "$d_dated" = "$d_current"
+          echo "digest=$d_dated" >> "$GITHUB_OUTPUT"
+      - name: Tirage sans identifiant par le digest, comparaison avec les tags du registre et contrôle de l'image publiée
+        env:
+          DATED: ${{ steps.t.outputs.dated }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+          TESTED_ID: ${{ steps.tested.outputs.id }}
+        run: |
+          set -euo pipefail
+          docker logout ghcr.io
+          docker image rm "$IMAGE:enshrouded-proton" "$IMAGE:$DATED"
+          if docker image inspect "$IMAGE@$DIGEST" >/dev/null 2>&1; then
+            echo "l'image est encore présente localement : le tirage ne prouverait rien"
+            exit 1
+          fi
+          # Digest de chaque tag dans le registre : empreinte du manifeste brut.
+          d_dated=sha256:$(docker buildx imagetools inspect --raw "$IMAGE:$DATED" | sha256sum | cut -d' ' -f1)
+          d_current=sha256:$(docker buildx imagetools inspect --raw "$IMAGE:enshrouded-proton" | sha256sum | cut -d' ' -f1)
+          echo "registre : tag daté $d_dated, tag courant $d_current ; publié : $DIGEST"
+          test "$d_dated" = "$DIGEST"
+          test "$d_current" = "$DIGEST"
+          docker pull "$IMAGE@$DIGEST"
+          pulled_id=$(docker image inspect -f '{{.Id}}' "$IMAGE@$DIGEST")
+          echo "image tirée : $pulled_id ; image contrôlée : $TESTED_ID"
+          test "$pulled_id" = "$TESTED_ID"
+          docker inspect -f '{{.Config.StopSignal}}' "$IMAGE@$DIGEST" | grep -qx SIGINT
+          docker run --rm --network none -v "$PWD/games/enshrouded-proton/tests:/tests:ro" \
+            --entrypoint bash "$IMAGE@$DIGEST" /tests/image-check.sh
