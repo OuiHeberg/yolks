@@ -67,9 +67,9 @@ c'est une étape à part, sur décision d'Arthur.
 ## Arrêt du serveur
 
 L'arrêt `^C` de l'egg devient un arrêt Docker : Wings appelle `ContainerStop`
-sans fixer de signal ni de délai, et Docker envoie le `STOPSIGNAL` de l'image,
-**SIGINT** (comme `wine_latest` et `:dayz`), à tini, qui le relaie à tout le
-groupe de processus.
+sans fixer de signal (avec le délai Docker `-1`, sans limite), et Docker envoie
+le `STOPSIGNAL` de l'image, **SIGINT** (comme `wine_latest` et `:dayz`), à
+tini, qui le relaie à tout le groupe de processus.
 
 Juste avant la commande de démarrage, l'entrypoint ignore SIGINT et SIGTERM
 (`trap '' INT TERM`). `tail` et le script `proton` en héritent, et ne meurent
@@ -81,10 +81,21 @@ trouvé le journal à son lancement (la rotation venait de le déplacer), comme
 avec la commande Wine. Sans ce trap, `tail` et l'entrypoint mouraient aussitôt, tini
 (PID 1) sortait, et le noyau tuait le jeu pendant sa sauvegarde.
 
-Un jeu bloqué fait donc attendre l'arrêt, puisque Wings attend sans limite. Il
-reste le bouton « Kill » du panel (SIGKILL), qui ne laisse pas sauvegarder. La
-mise à jour SteamCMD du démarrage, qui passe avant le trap, reste
-interruptible.
+Wings, lui, n'attend que **10 minutes** l'arrêt du conteneur (`WaitForStop`
+avec `terminate`) : passé ce délai, il le tue (SIGKILL), sans sauvegarde. Un
+jeu bloqué fait donc attendre l'arrêt jusqu'à 10 minutes. Le bouton « Kill »
+du panel envoie SIGKILL tout de suite.
+
+La mise à jour SteamCMD du démarrage, qui passe avant le trap, reste
+interruptible. Un arrêt reçu pendant cette mise à jour est noté par
+l'entrypoint, qui sort en 0 sans lancer le jeu, même si SteamCMD intercepte
+le signal et sort en 0.
+
+Un « Stop » envoyé dans les secondes qui suivent un « Start » (plus longtemps
+au premier démarrage, le temps que Proton crée son préfixe) peut rester sans
+effet jusqu'au « Kill », ou jusqu'aux 10 minutes de Wings. Le jeu n'a pas
+encore posé son gestionnaire de Ctrl+C, et le SIGINT, ignoré jusque-là, est
+perdu.
 
 ## Prérequis du nœud
 
