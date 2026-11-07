@@ -1,10 +1,21 @@
 # Images Node.js des serveurs clients OuiPanel (ghcr.io/ouiheberg/yolks:nodejs_XX).
 # Dockerfiles repris de pelican-eggs/yolks@9db46b2 (licence MIT), base Node épinglée.
+#
+# Sur une pull request, ou lancé à la main sur une autre branche que main : banc
+# seulement (construction et contrôle de la version de Node), sans aucun droit
+# d'écriture, RIEN n'est publié.
+# Sur main (push, lundi 03:00 UTC, lancement à la main sur main) : chaque version est
+# construite et contrôlée, puis publiée telle quelle, puis tirée sans identifiant et
+# contrôlée à nouveau. Une version en échec n'empêche pas la publication des autres.
 name: build nodejs
 on:
   workflow_dispatch:
   schedule:
     - cron: "0 3 * * 1"   # chaque lundi 03:00 UTC : mises à jour Debian de la base
+  pull_request:
+    paths:
+      - nodejs/**
+      - .github/workflows/nodejs.yml
   push:
     branches:
       - main
@@ -13,12 +24,26 @@ on:
       - .github/workflows/nodejs.yml
 permissions:
   contents: read
-  packages: write
+
+env:
+  # Pas d'artefact .dockerbuild public (il contient le contenu de l'événement GitHub).
+  DOCKER_BUILD_RECORD_UPLOAD: false
+
+# Un seul run à la fois par branche : deux fusions rapprochées ne publient plus en
+# parallèle (un run plus lent ne peut plus republier une version plus ancienne).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  push:
-    name: "yolks:nodejs_${{ matrix.tag }}"
+  banc:
+    name: "banc nodejs_${{ matrix.tag }}"
+    # Hors main seulement : sur main, le job publication refait la même construction
+    # et le même contrôle avant de se connecter au registre.
+    if: github.event_name == 'pull_request' || github.ref != 'refs/heads/main'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -27,27 +52,87 @@ jobs:
           - 24
           - 26
     steps:
-      - uses: actions/checkout@v7
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/login-action@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          persist-credentials: false
       - id: v
         name: Version de Node de la base
-        run: echo "node=$(sed -nE 's#^FROM .*node:([0-9]+\.[0-9]+\.[0-9]+)-.*#\1#p' nodejs/${{ matrix.tag }}/Dockerfile)" >> "$GITHUB_OUTPUT"
-      - uses: docker/build-push-action@v7
+        run: |
+          node="$(sed -nE 's#^FROM .*node:([0-9]+\.[0-9]+\.[0-9]+)-.*#\1#p' "nodejs/${{ matrix.tag }}/Dockerfile")"
+          [ -n "$node" ] || { echo "Version de Node introuvable dans nodejs/${{ matrix.tag }}/Dockerfile"; exit 1; }
+          echo "node=$node" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: ./nodejs
           file: ./nodejs/${{ matrix.tag }}/Dockerfile
           platforms: linux/amd64
           pull: true
-          push: true
-          tags: |
-            ghcr.io/ouiheberg/yolks:nodejs_${{ matrix.tag }}
-            ghcr.io/ouiheberg/yolks:nodejs_${{ matrix.tag }}-${{ steps.v.outputs.node }}
-      - name: Contrôle de la version publiée
+          load: true
+          push: false
+          provenance: false
+          tags: banc/nodejs:${{ matrix.tag }}
+      - name: Contrôle de la version de Node
+        run: docker run --rm --pull=never --entrypoint node "banc/nodejs:${{ matrix.tag }}" --version | grep -x "v${{ steps.v.outputs.node }}"
+
+  publication:
+    name: "yolks:nodejs_${{ matrix.tag }}"
+    # Jamais sur une pull request, jamais depuis une autre branche que main.
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        tag:
+          - 22
+          - 24
+          - 26
+    env:
+      IMAGE: ghcr.io/ouiheberg/yolks
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: v
+        name: Version de Node de la base
         run: |
-          docker pull ghcr.io/ouiheberg/yolks:nodejs_${{ matrix.tag }}
-          docker run --rm --entrypoint node ghcr.io/ouiheberg/yolks:nodejs_${{ matrix.tag }} --version | grep -x "v${{ steps.v.outputs.node }}"
+          node="$(sed -nE 's#^FROM .*node:([0-9]+\.[0-9]+\.[0-9]+)-.*#\1#p' "nodejs/${{ matrix.tag }}/Dockerfile")"
+          [ -n "$node" ] || { echo "Version de Node introuvable dans nodejs/${{ matrix.tag }}/Dockerfile"; exit 1; }
+          echo "node=$node" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      # Construite et contrôlée AVANT la connexion au registre : c'est cette image-là,
+      # et pas une reconstruction, qui est poussée ensuite.
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ./nodejs
+          file: ./nodejs/${{ matrix.tag }}/Dockerfile
+          platforms: linux/amd64
+          pull: true
+          load: true
+          push: false
+          provenance: false
+          tags: |
+            ${{ env.IMAGE }}:nodejs_${{ matrix.tag }}
+            ${{ env.IMAGE }}:nodejs_${{ matrix.tag }}-${{ steps.v.outputs.node }}
+      - name: Contrôle de la version de Node avant publication
+        run: docker run --rm --pull=never --entrypoint node "$IMAGE:nodejs_${{ matrix.tag }}" --version | grep -x "v${{ steps.v.outputs.node }}"
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publication (tag versionné, puis tag courant)
+        run: |
+          docker push "$IMAGE:nodejs_${{ matrix.tag }}-${{ steps.v.outputs.node }}"
+          docker push "$IMAGE:nodejs_${{ matrix.tag }}"
+      - name: Contrôle de la version publiée, tirée sans identifiant comme sur les nœuds
+        run: |
+          docker logout ghcr.io
+          docker image rm "$IMAGE:nodejs_${{ matrix.tag }}" "$IMAGE:nodejs_${{ matrix.tag }}-${{ steps.v.outputs.node }}"
+          for t in "nodejs_${{ matrix.tag }}" "nodejs_${{ matrix.tag }}-${{ steps.v.outputs.node }}"; do
+            docker pull "$IMAGE:$t"
+            docker run --rm --pull=never --entrypoint node "$IMAGE:$t" --version | grep -x "v${{ steps.v.outputs.node }}"
+          done
