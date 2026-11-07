@@ -40,6 +40,8 @@ jobs:
       IMAGE: ghcr.io/ouiheberg/yolks
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Banc de oh-steam-install (doublures, sans réseau ni compte Steam)
         run: bash steam-installer/tests/oh-steam-install.test.sh
       - id: t
@@ -91,6 +93,8 @@ jobs:
       IMAGE: ghcr.io/ouiheberg/yolks
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - id: t
         name: Tag daté
         run: echo "dated=dayz-$(date -u +%Y%m%d)-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
