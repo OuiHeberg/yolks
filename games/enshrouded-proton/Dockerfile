@@ -4,10 +4,9 @@
 #
 # Pourquoi : sous Wine stable, sans esync, fsync ni ntsync, wineserver prend
 # beaucoup de CPU. GE-Proton active fsync (appel futex_waitv, noyau 5.16 ou
-# plus). Test du 07/11/2026 sur un nœud de jeu (noyau 6.12, Docker 29.3),
-# même monde, 5 minutes au repos : 49 % de CPU sous Wine contre 35 % sous
-# Proton, et 11 752 changements de contexte par seconde pour wineserver contre
-# 182.
+# plus). Test du 07/11/2026, même monde des deux côtés, 5 minutes au repos :
+# 49 % de CPU sous Wine contre 35 % sous Proton, et 11 752 changements de
+# contexte par seconde pour wineserver contre 182.
 #
 # Recette reprise de jsknnr/enshrouded-server@a06a798b (PR #153, licence MIT) :
 #  - GE-Proton 11-9 (GloriousEggroll), dont l'archive est vérifiée par
