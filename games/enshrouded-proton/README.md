@@ -44,7 +44,7 @@ un client peut la choisir en gardant la commande Wine, et son serveur s'arrête
 sur `wine: command not found`. L'étape suivante est donc une commande d'egg qui
 choisit Proton quand `PROTON_PATH` est défini (cette image) et Wine sinon, à
 essayer aussi avec les images déjà en place. Elle n'est pas dans ce dépôt :
-c'est une étape à part, sur décision d'Arthur.
+c'est une étape à part, à décider séparément.
 
 ## Ce que fait l'image
 
@@ -85,15 +85,30 @@ trouvé le journal à son lancement (la rotation venait de le déplacer), comme
 avec la commande Wine. Sans ce trap, `tail` et l'entrypoint mouraient aussitôt, tini
 (PID 1) sortait, et le noyau tuait le jeu pendant sa sauvegarde.
 
-Wings, lui, n'attend que **10 minutes** l'arrêt du conteneur (`WaitForStop`
-avec `terminate`) : passé ce délai, il le tue (SIGKILL), sans sauvegarde. Un
-jeu bloqué fait donc attendre l'arrêt jusqu'à 10 minutes. Le bouton « Kill »
-du panel envoie SIGKILL tout de suite.
+Wings n'attend pas sans limite. Il attend l'arrêt du conteneur par
+`WaitForStop` avec `terminate` : passé le délai, il le tue (SIGKILL), sans
+sauvegarde. Le délai dépend de la cause de l'arrêt (sources du Wings de
+OuiHeberg) :
+
+| Cause | Délai | Source |
+| --- | --- | --- |
+| « Stop » et « Restart » | 10 minutes | `server/power.go` |
+| suspension du serveur, disque plein | 1 minute | `server/update.go`, `server/listeners.go` |
+| réinstallation, import | 10 secondes | `server/install.go`, `server/import.go` |
+
+Un jeu bloqué fait donc attendre un « Stop » jusqu'à 10 minutes. Un arrêt de
+dockerd ou un redémarrage du nœud couperait sans doute le jeu au bout de
+10 secondes : Wings ne fixe pas `StopTimeout` à la création du conteneur
+(`environment/docker/container.go`), et Docker applique alors son délai par
+défaut, 10 secondes, avant SIGKILL (sauf avec `live-restore`, qui garde les
+conteneurs pendant un redémarrage de dockerd). Dans les cas à 1 minute ou
+moins, la sauvegarde du monde peut être coupée. Le bouton « Kill » du panel
+envoie SIGKILL tout de suite.
 
 La mise à jour SteamCMD du démarrage, qui passe avant le trap, reste
 interruptible. Un arrêt reçu pendant cette mise à jour est noté par
-l'entrypoint, qui sort en 0 sans lancer le jeu, même si SteamCMD intercepte
-le signal et sort en 0.
+l'entrypoint, qui sort en 0 sans afficher ni lancer la commande de démarrage,
+même si SteamCMD intercepte le signal et sort en 0.
 
 Un « Stop » envoyé dans les secondes qui suivent un « Start » (plus longtemps
 au premier démarrage, le temps que Proton crée son préfixe) peut rester sans
