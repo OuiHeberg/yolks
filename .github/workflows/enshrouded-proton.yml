@@ -13,10 +13,13 @@
 #    après le banc. Un lancement à la main sur une autre branche ne fait que le
 #    banc. Il reconstruit l'image et rejoue TOUS les contrôles du banc sur
 #    l'image qu'il va publier, avant de se connecter au registre. Il publie le
-#    tag daté (retour arrière, avec le numéro du run : jamais écrasé par un
-#    autre run), puis le tag courant. Il relève le digest publié, vérifie que
-#    les deux tags du registre y mènent, tire l'image PAR CE DIGEST et SANS
-#    identifiant, vérifie que c'est bien l'image contrôlée, et la recontrôle.
+#    tag daté (retour arrière, avec le numéro du run et de la tentative :
+#    jamais écrasé par un autre run ni par une relance), puis le tag courant.
+#    Il relève le digest publié, vérifie que les deux tags du registre y
+#    mènent, tire l'image PAR CE DIGEST et SANS identifiant, vérifie que c'est
+#    bien l'image contrôlée, et la recontrôle.
+# Pas d'attestation de provenance (provenance: false) : elle embarquerait les
+# détails de l'événement qui a lancé le run.
 # Actions épinglées par SHA (version en commentaire, mise à jour par dependabot).
 name: build enshrouded-proton
 on:
@@ -66,6 +69,7 @@ jobs:
           pull: true
           load: true
           push: false
+          provenance: false
           tags: ${{ env.IMAGE }}:enshrouded-proton
       - name: Signal d'arrêt de l'image (SIGINT, comme wine_latest et dayz)
         run: docker inspect -f '{{.Config.StopSignal}}' "$IMAGE:enshrouded-proton" | grep -qx SIGINT
@@ -99,8 +103,8 @@ jobs:
         with:
           persist-credentials: false
       - id: t
-        name: Tag daté (date, commit et numéro du run)
-        run: echo "dated=enshrouded-proton-$(date -u +%Y%m%d)-${GITHUB_SHA::7}-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+        name: Tag daté (date, commit, numéro du run et de la tentative)
+        run: echo "dated=enshrouded-proton-$(date -u +%Y%m%d)-${GITHUB_SHA::7}-${{ github.run_id }}-${{ github.run_attempt }}" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -109,6 +113,7 @@ jobs:
           pull: true
           load: true
           push: false
+          provenance: false
           tags: |
             ${{ env.IMAGE }}:enshrouded-proton
             ${{ env.IMAGE }}:${{ steps.t.outputs.dated }}

@@ -13,7 +13,7 @@ digest, sans identifiant, pour la recontrôler.
 | Tag | Rôle |
 | --- | --- |
 | `ghcr.io/ouiheberg/yolks:enshrouded-proton` | tag courant, à mettre dans l'egg |
-| `ghcr.io/ouiheberg/yolks:enshrouded-proton-AAAAMMJJ-sha7-run` | tag daté de chaque publication, pour le retour arrière (`run` : numéro du run GitHub Actions, pour qu'une autre publication du même jour et du même commit ne l'écrase pas) |
+| `ghcr.io/ouiheberg/yolks:enshrouded-proton-AAAAMMJJ-sha7-run-tentative` | tag daté de chaque publication, pour le retour arrière (`run` : numéro du run GitHub Actions, `tentative` : numéro de sa relance, pour qu'aucune autre publication, ni relance, ne l'écrase) |
 
 ## Commande de démarrage de l'egg pour cette image
 
@@ -165,5 +165,5 @@ docker run --rm --network none --entrypoint python3 ghcr.io/ouiheberg/yolks:ensh
 - Pour un serveur : remettre l'image `ghcr.io/ptero-eggs/yolks:wine_latest` et
   la commande Wine de l'egg. Le monde et `.wine` sont restés en place.
 - Pour l'image : mettre dans l'egg un tag daté précédent
-  (`enshrouded-proton-AAAAMMJJ-sha7-run`), ou annuler le commit fautif sur `main`
+  (`enshrouded-proton-AAAAMMJJ-sha7-run-tentative`), ou annuler le commit fautif sur `main`
   (le workflow republie alors le tag courant).
