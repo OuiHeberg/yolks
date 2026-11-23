@@ -5,12 +5,14 @@
 #
 # Sur une pull request, ou lancé à la main sur une autre branche que main : banc seulement
 # (construction, contrôles de java/tests/controle-image.sh, vrai démarrage Paper pour
-# 17, 21, 22, 25, 26 et les deux GraalVM), sans aucun droit d'écriture, RIEN n'est publié.
+# 17, 21, 22, 25, 26 et les deux GraalVM avec les options de conteneur de Wings, connexions
+# TLS de java/tests/racines-tls.sh), sans aucun droit d'écriture, RIEN n'est publié.
 # Sur main (push dans java/, lundi 03:00 UTC, lancement à la main sur main) : chaque image
 # est construite et contrôlée, puis publiée telle quelle (étiquette versionnée, puis
 # étiquette courante), puis tirée sans identifiant et contrôlée à nouveau. Une image en
 # échec n'empêche pas la publication des autres. Le démarrage Paper (réseau PaperMC et
-# Mojang) n'est fait qu'au banc : une panne chez eux ne bloque pas un correctif urgent.
+# Mojang) et les connexions TLS ne sont faits qu'au banc : une panne d'un site tiers ne
+# bloque pas un correctif urgent.
 name: build java
 on:
   workflow_dispatch:
@@ -60,8 +62,11 @@ jobs:
         run: |
           bash -n java/entrypoint.sh
           bash -n java/version.sh
+          bash -n java/retirer-racines.sh
+          bash -n java/tests/wings.sh
           bash -n java/tests/controle-image.sh
           bash -n java/tests/demarrage-paper.sh
+          bash -n java/tests/racines-tls.sh
       - id: v
         name: Version de Java de la base
         run: |
@@ -79,11 +84,14 @@ jobs:
           push: false
           provenance: false
           tags: banc/java:${{ matrix.tag }}
-      - name: Contrôles de l'image (version, utilisateur, outils, démarrage façon Wings, Java4Shell)
+      - name: Contrôles de l'image (version, utilisateur, outils, démarrage façon Wings, Java4Shell, racines)
         run: bash java/tests/controle-image.sh "banc/java:${{ matrix.tag }}" "${{ matrix.tag }}"
-      - name: Vrai démarrage Paper jusqu'à « Done », puis « stop »
+      - name: Vrai démarrage Paper jusqu'à « Done », puis « stop » (options de conteneur de Wings)
         timeout-minutes: 15
         run: bash java/tests/demarrage-paper.sh "banc/java:${{ matrix.tag }}" "${{ matrix.tag }}"
+      - name: Connexions TLS de Java (chaîne Sectigo par AAA acceptée, chaînes eMudhra refusées)
+        timeout-minutes: 5
+        run: bash java/tests/racines-tls.sh "banc/java:${{ matrix.tag }}" "${{ matrix.tag }}"
 
   publication:
     name: "yolks:java_${{ matrix.tag }}"

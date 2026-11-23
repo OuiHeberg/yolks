@@ -1,7 +1,7 @@
 # Image ghcr.io/ouiheberg/yolks:java_22 des serveurs de jeu OuiPanel.
 # Dockerfile repris de pelican-eggs/yolks@3680e41 (java/22/Dockerfile, licence MIT).
 # Écarts avec l'amont : base épinglée sur une version précise (amont : eclipse-temurin:22-jdk-noble),
-# étiquettes OuiHeberg, OH_JAVA4SHELL_ATTENUATION.
+# étiquettes OuiHeberg, apt upgrade, OH_JAVA4SHELL_ATTENUATION, racines eMudhra retirées.
 # Java 22 : fin de vie chez Adoptium (dernière version 22.0.2+9, juillet 2024).
 
 FROM        --platform=$TARGETOS/$TARGETARCH eclipse-temurin:22.0.2_9-jdk-noble
@@ -15,7 +15,10 @@ LABEL       author="Michael Parker" maintainer="OuiHeberg <contact@ouiheberg.com
 # L'entrypoint ajoute ces options à JDK_JAVA_OPTIONS (intrinsèque Base64 de HotSpot coupée).
 ENV         OH_JAVA4SHELL_ATTENUATION="-XX:-UseBASE64Intrinsics"
 
+# Mises à jour Ubuntu reprises à chaque construction (chaque lundi), comme games/dayz.
+ARG         DEBIAN_FRONTEND=noninteractive
 RUN         apt update -y \
+            && apt upgrade -y \
             && apt install -y \
                 curl \
                 lsof \
@@ -32,7 +35,13 @@ RUN         apt update -y \
                 tini \
                 zip \
                 unzip \
-                jq
+                jq \
+            && rm -rf /var/lib/apt/lists/*
+
+# Racines de certificats retirées par Debian et Ubuntu après la compromission d'eMudhra
+# (java/racines-retirees.txt) : ce JDK ne recevra plus de mise à jour de son magasin.
+RUN         --mount=type=bind,source=.,target=/oh-src \
+            bash /oh-src/retirer-racines.sh
 
 ## Setup user and working directory
 RUN         useradd -m -d /home/container -s /bin/bash container

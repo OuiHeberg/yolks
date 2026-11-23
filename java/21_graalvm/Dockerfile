@@ -4,7 +4,8 @@
 # (licence GFTC).
 # Le JDK est posé sur Ubuntu 24.04, comme les images Temurin, pour garder les mêmes paquets et
 # le même entrypoint : Dockerfile repris de pelican-eggs/yolks@3680e41 (java/21/Dockerfile,
-# licence MIT), base remplacée, paquet « locales » ajouté.
+# licence MIT), base remplacée, paquet « locales » ajouté, apt upgrade, racines eMudhra
+# retirées du magasin du JDK.
 #
 # GraalVM Community pour JDK 21 n'est plus mis à jour depuis 21.0.2 (16/01/2024) : plus
 # aucun correctif de sécurité depuis, aucune version corrigée de CVE-2026-114938 n'existe
@@ -34,7 +35,10 @@ ENV         JAVA_HOME=/opt/java/graalvm \
 # L'entrypoint ajoute ces options à JDK_JAVA_OPTIONS.
 ENV         OH_JAVA4SHELL_ATTENUATION="-XX:-UseBASE64Intrinsics"
 
+# Mises à jour Ubuntu reprises à chaque construction (chaque lundi), comme games/dayz.
+ARG         DEBIAN_FRONTEND=noninteractive
 RUN         apt update -y \
+            && apt upgrade -y \
             && apt install -y \
                 locales \
                 curl \
@@ -54,9 +58,15 @@ RUN         apt update -y \
 				unzip \
                 jq \
             && echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen \
-            && locale-gen en_US.UTF-8
+            && locale-gen en_US.UTF-8 \
+            && rm -rf /var/lib/apt/lists/*
 
 COPY        --from=graalvm /graalvm /opt/java/graalvm
+# Racines de certificats retirées par Debian et Ubuntu après la compromission d'eMudhra
+# (java/racines-retirees.txt) : ce JDK ne recevra plus de mise à jour de son magasin.
+RUN         --mount=type=bind,source=.,target=/oh-src \
+            bash /oh-src/retirer-racines.sh
+
 RUN         java -version
 
 ## Setup user and working directory

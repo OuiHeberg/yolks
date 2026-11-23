@@ -3,14 +3,18 @@
 # Usage : java/tests/demarrage-paper.sh <image> <dossier de java/>
 #
 # Comme Wings : entrypoint de l'image, commande de démarrage de l'egg 2 « Minecraft » (relevée
-# le 23/11/2026) dans STARTUP, uid sans compte dans l'image, dossier du serveur monté sur
-# /home/container (ici un dossier vide créé pour le test), arrêt par la commande « stop » sur
-# l'entrée standard. Le jar Paper est épinglé (build et SHA-256 publiés par PaperMC).
+# le 23/11/2026) dans STARTUP, options de conteneur de Wings (tests/wings.sh : uid 4242 sans
+# compte dans l'image, racine en lecture seule, /tmp en tmpfs, no-new-privileges, capacités
+# retirées), dossier du serveur monté sur /home/container (ici un dossier vide créé pour le
+# test, donné à l'uid 4242), arrêt par la commande « stop » sur l'entrée standard.
+# Le jar Paper est épinglé (build et SHA-256 publiés par PaperMC).
 # Besoin du réseau : Paper télécharge le serveur Mojang et ses bibliothèques au premier lancement.
 set -euo pipefail
 
 image="${1:?usage : demarrage-paper.sh <image> <dossier>}"
 dossier="${2:?usage : demarrage-paper.sh <image> <dossier>}"
+# shellcheck source=wings.sh
+. "$(dirname "$0")/wings.sh"
 
 case "$dossier" in
     17)                 version=1.20.4;  build=499; sha=cabed3ae77cf55deba7c7d8722bc9cfd5e991201c211665f9265616d9fe5c77b ;;
@@ -36,12 +40,14 @@ echo "== Paper $version (build $build) dans $image"
 curl -fsSL --retry 3 -o "$serveur/paper.jar" "https://fill-data.papermc.io/v1/objects/$sha/paper-$version-$build.jar"
 echo "$sha  $serveur/paper.jar" | sha256sum -c -
 echo "eula=true" > "$serveur/eula.txt"
+dossier_serveur "$image" "$serveur"
 
 mkfifo "$entree"
 debut=$(date +%s)
-docker run --rm -i --pull=never --name "$nom" --user "$(id -u):$(id -g)" -v "$serveur:/home/container" \
+docker run --rm -i --pull=never --name "$nom" "${WINGS_OPTS[@]}" -v "$serveur:/home/container" \
     -e STARTUP="$STARTUP" -e SERVER_MEMORY=1280 -e SERVER_JARFILE=paper.jar \
     -e SERVER_IP=0.0.0.0 -e SERVER_PORT=25565 -e TZ=Europe/Paris \
+    -e P_SERVER_UUID=00000000-0000-0000-0000-000000000000 \
     "$image" <"$entree" >"$journal" 2>&1 &
 pid=$!
 exec 3>"$entree"   # garde l'entrée standard ouverte jusqu'au « stop »
@@ -75,5 +81,5 @@ if [ $code -ne 0 ]; then
     echo "ÉCHEC : le serveur ne s'est pas arrêté proprement après « stop » (code $code)"; fin; exit 1
 fi
 grep -qi 'Stopping server' "$journal" || { echo "ÉCHEC : « Stopping server » absent de la console"; fin; exit 1; }
-echo "OK : arrêt par « stop », code 0"
+echo "OK : arrêt par « stop », code 0 (uid $WINGS_UID, racine en lecture seule, /tmp en tmpfs)"
 grep -m3 -E 'container~|Picked up JDK_JAVA_OPTIONS|Paper version|This server is running' "$journal" | sed 's/^/    /' || true

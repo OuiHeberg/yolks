@@ -6,8 +6,9 @@ une ligne `FROM`, sans attendre que quelqu'un d'autre reconstruise son image.
 
 Dockerfiles et `entrypoint.sh` repris de [pelican-eggs/yolks@3680e41](https://github.com/pelican-eggs/yolks/tree/3680e41e0286cf0ff4276fe59f69334e4b3d2bc9/java)
 (licence MIT, voir `LICENSE.md` à la racine). Écarts avec l'amont : base Java épinglée sur
-une version précise, étiquettes OuiHeberg, atténuation de CVE-2026-114938 pour les JDK sans
-correctif (voir plus bas), et pour GraalVM un JDK recopié de l'image officielle.
+une version précise, étiquettes OuiHeberg, `apt upgrade` à chaque construction, atténuation de
+CVE-2026-114938 pour les JDK sans correctif, racines eMudhra retirées des JDK en fin de vie
+(voir plus bas), et pour Java 16 et GraalVM un JDK recopié sur `ubuntu:noble`.
 
 ## Images
 
@@ -15,7 +16,7 @@ correctif (voir plus bas), et pour GraalVM un JDK recopié de l'image officielle
 |---|---|---|---|
 | `java_8` | `eclipse-temurin:8u512-b09-jdk-noble` | 8u512 | non concerné |
 | `java_11` | `eclipse-temurin:11.0.33_10-jdk-noble` | 11.0.33 | non concerné |
-| `java_16` | `eclipse-temurin:16.0.2_7-jdk-focal` | 16.0.2 (fin de vie) | non concerné (code absent avant 17.0.6) |
+| `java_16` | JDK de `eclipse-temurin:16.0.2_7-jdk-focal` sur `ubuntu:noble` | 16.0.2 (fin de vie) | non concerné (code absent avant 17.0.6) |
 | `java_17` | `eclipse-temurin:17.0.21.1_2-jdk-noble` | 17.0.21.1 | corrigé |
 | `java_21` | `eclipse-temurin:21.0.13.1_2-jdk-noble` | 21.0.13.1 | corrigé |
 | `java_22` | `eclipse-temurin:22.0.2_9-jdk-noble` | 22.0.2 (fin de vie) | pas de correctif, atténué |
@@ -32,11 +33,30 @@ Communs à toutes : utilisateur `container`, `HOME` et `WORKDIR` `/home/containe
 `STOPSIGNAL SIGINT`, `tini -g` puis `/entrypoint.sh` (remplace les `{{VARIABLE}}` de la
 commande de démarrage et l'exécute). Paquets de l'amont : curl, lsof, ca-certificates,
 openssl, git, tar, sqlite3, fontconfig, tzdata, iproute2, libfreetype6, tini, zip, unzip,
-jq, et redis-tools pour 8, 11, 16, 17, 21, 22 et `java_21_graalvm`.
+jq, et redis-tools pour 8, 11, 16, 17, 21, 22 et `java_21_graalvm`. Chaque construction (donc
+chaque lundi) fait `apt upgrade` : le système reçoit les correctifs Ubuntu même quand la base
+Java n'est plus reconstruite par Docker Hub (16, 22, 26).
 
 **GraalVM** : GraalVM Community seulement (pas d'Oracle GraalVM, licence GFTC). Le JDK est
 recopié tel quel de l'image officielle (Oracle Linux 9) et posé sur `ubuntu:noble`, avec les
 mêmes paquets et le même entrypoint que les images Temurin.
+
+**Java 16** : la dernière image Temurin 16 est sur Ubuntu 20.04, qui ne reçoit plus de
+correctifs depuis mai 2025. Son JDK est recopié de la même façon sur `ubuntu:noble`.
+
+## Racines de certificats retirées (eMudhra)
+
+Après la compromission d'eMudhra (17/10/2026), Debian et Ubuntu ont retiré « Comodo AAA »
+(`CN=AAA Certificate Services`) et « emSign ECC Root CA - G3 ». Les JDK en fin de vie les
+ont encore : `java/retirer-racines.sh` les retire du magasin du JDK à la construction de
+`java_16`, `java_22`, `java_26` et `java_21_graalvm`, par empreinte SHA-256
+(`java/racines-retirees.txt`). Les autres racines emSign restent, comme chez Debian. Le
+magasin du système (Ubuntu à jour) ne les a déjà plus. Le banc vérifie leur absence des deux
+magasins dans les 10 images, puis fait de vraies connexions TLS depuis Java : une chaîne
+Sectigo envoyée par « USERTrust RSA <- AAA » reste acceptée (la racine USERTrust RSA suffit),
+et les sites de démonstration de la compromission sont refusés. Le contrôle de révocation
+(`checkRevocation`, `enableCRLDP`) n'est pas activé : il bloquerait les connexions quand un
+serveur de CRL ne répond pas.
 
 ## CVE-2026-114938 (Java4Shell)
 
@@ -86,8 +106,15 @@ accepte n'importe quelles options de la JVM 9 et plus).
 
 - `java/version.sh <dossier>` : version de Java lue dans le `FROM` (étiquette versionnée et
   texte attendu de `java -version`).
+- `java/tests/wings.sh` : options de conteneur de Wings (uid 4242 absent des images, racine en
+  lecture seule, `/tmp` en tmpfs de 100 Mo, `no-new-privileges`, capacités retirées), reprises
+  de `environment/docker/container.go` de notre Wings.
 - `java/tests/controle-image.sh <image> <dossier>` : configuration lue par Wings, `java -version`,
   utilisateur et dossier, outils, locale, démarrage `STARTUP='java -version'`, démarrage façon
-  Wings (uid sans compte dans l'image, dossier monté), options Java4Shell.
+  Wings (options ci-dessus, dossier du serveur à l'uid 4242), options Java4Shell, absence des
+  racines retirées.
 - `java/tests/demarrage-paper.sh <image> <dossier>` : vrai serveur Paper (jar épinglé) avec la
-  commande de démarrage de l'egg 2, jusqu'à « Done », puis `stop` (17, 21, 22, 25, 26, GraalVM).
+  commande de démarrage de l'egg 2 et les options de Wings, jusqu'à « Done », puis `stop`
+  (17, 21, 22, 25, 26, GraalVM).
+- `java/tests/racines-tls.sh <image> <dossier>` : connexions TLS depuis le Java de l'image
+  (`java/tests/VerifTls.java`), Sectigo acceptée et eMudhra refusée.

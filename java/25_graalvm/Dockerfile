@@ -4,7 +4,7 @@
 # (licence GFTC).
 # Le JDK est posé sur Ubuntu 24.04, comme les images Temurin, pour garder les mêmes paquets et
 # le même entrypoint : Dockerfile repris de pelican-eggs/yolks@3680e41 (java/25/Dockerfile,
-# licence MIT), base remplacée, paquet « locales » ajouté.
+# licence MIT), base remplacée, paquet « locales » ajouté, apt upgrade.
 #
 # GraalVM Community 25 Innovation 5 (graal 25.5.5.0.3, JDK 25.0.5.0.3 du 24/10/2026) ne
 # contient pas le correctif de CVE-2026-114938, ni côté HotSpot (8393212) ni côté Graal
@@ -36,7 +36,10 @@ ENV         JAVA_HOME=/opt/java/graalvm \
 # L'entrypoint ajoute ces options à JDK_JAVA_OPTIONS.
 ENV         OH_JAVA4SHELL_ATTENUATION="-XX:-UseBASE64Intrinsics -XX:UseAVX=2"
 
+# Mises à jour Ubuntu reprises à chaque construction (chaque lundi), comme games/dayz.
+ARG         DEBIAN_FRONTEND=noninteractive
 RUN         apt update -y \
+            && apt upgrade -y \
             && apt install -y \
                 locales \
                 curl \
@@ -55,7 +58,8 @@ RUN         apt update -y \
                 unzip \
                 jq \
             && echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen \
-            && locale-gen en_US.UTF-8
+            && locale-gen en_US.UTF-8 \
+            && rm -rf /var/lib/apt/lists/*
 
 COPY        --from=graalvm /graalvm /opt/java/graalvm
 RUN         java -version
