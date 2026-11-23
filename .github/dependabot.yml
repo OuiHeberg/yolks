@@ -11,6 +11,30 @@ updates:
     ignore:
       - dependency-name: node
         update-types: ["version-update:semver-major"]
+  # Images Java : une PR dès qu'une version corrective de Temurin sort sur la même ligne
+  # (17.0.21.1_2 -> 17.0.22_7, …), jamais un changement de ligne (17 -> 18).
+  # Ne sont PAS suivies, faute d'étiquette que Dependabot sache comparer :
+  #  - java/8 (eclipse-temurin:8u512-b09-…) : nouvelle version à poser à la main ;
+  #  - java/25_graalvm (ghcr.io/graalvm/jdk-community:25i5-…) : idem ;
+  #  - la base ubuntu:noble des images GraalVM (reprise chaque semaine par le workflow).
+  # Java 16, 22, 26 et GraalVM 21 sont en fin de vie : aucune PR n'est attendue.
+  - package-ecosystem: docker
+    directories:
+      - /java/8
+      - /java/11
+      - /java/16
+      - /java/17
+      - /java/21
+      - /java/22
+      - /java/25
+      - /java/26
+      - /java/21_graalvm
+      - /java/25_graalvm
+    schedule:
+      interval: daily
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: /
     schedule:

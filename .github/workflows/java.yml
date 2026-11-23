@@ -1,0 +1,162 @@
+# Images Java des serveurs de jeu OuiPanel (ghcr.io/ouiheberg/yolks:java_XX).
+# Dockerfiles repris de pelican-eggs/yolks@3680e41 (licence MIT), base Java épinglée :
+# Temurin (eclipse-temurin) pour java_8 à java_26, GraalVM Community pour java_21_graalvm
+# et java_25_graalvm. La version de Java est lue dans la ligne FROM (java/version.sh).
+#
+# Sur une pull request, ou lancé à la main sur une autre branche que main : banc seulement
+# (construction, contrôles de java/tests/controle-image.sh, vrai démarrage Paper pour
+# 17, 21, 22, 25, 26 et les deux GraalVM avec les options de conteneur de Wings, connexions
+# TLS de java/tests/racines-tls.sh), sans aucun droit d'écriture, RIEN n'est publié.
+# Sur main (push dans java/, lundi 03:00 UTC, lancement à la main sur main) : chaque image
+# est construite et contrôlée, puis publiée telle quelle (étiquette versionnée, puis
+# étiquette courante), puis tirée sans identifiant et contrôlée à nouveau. Une image en
+# échec n'empêche pas la publication des autres. Le démarrage Paper (réseau PaperMC et
+# Mojang) et les connexions TLS ne sont faits qu'au banc : une panne d'un site tiers ne
+# bloque pas un correctif urgent.
+name: build java
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * 1"   # chaque lundi 03:00 UTC : mises à jour Ubuntu de la base
+  pull_request:
+    paths:
+      - java/**
+      - .github/workflows/java.yml
+  push:
+    branches:
+      - main
+    paths:
+      - java/**
+      - .github/workflows/java.yml
+permissions:
+  contents: read
+
+env:
+  # Pas d'artefact .dockerbuild public (il contient le contenu de l'événement GitHub).
+  DOCKER_BUILD_RECORD_UPLOAD: false
+
+# Un seul run à la fois par branche : deux fusions rapprochées ne publient plus en
+# parallèle (un run plus lent ne peut plus republier une version plus ancienne).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  banc:
+    name: "banc java_${{ matrix.tag }}"
+    # Hors main seulement : sur main, le job publication refait la même construction
+    # et les mêmes contrôles avant de se connecter au registre.
+    if: github.event_name == 'pull_request' || github.ref != 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        tag: ["8", "11", "16", "17", "21", "22", "25", "26", "21_graalvm", "25_graalvm"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Syntaxe des scripts
+        run: |
+          bash -n java/entrypoint.sh
+          bash -n java/version.sh
+          bash -n java/retirer-racines.sh
+          bash -n java/tests/wings.sh
+          bash -n java/tests/controle-image.sh
+          bash -n java/tests/demarrage-paper.sh
+          bash -n java/tests/racines-tls.sh
+      - id: v
+        name: Version de Java de la base
+        run: |
+          v=$(java/version.sh "${{ matrix.tag }}")
+          echo "$v"
+          echo "$v" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ./java
+          file: ./java/${{ matrix.tag }}/Dockerfile
+          platforms: linux/amd64
+          pull: true
+          load: true
+          push: false
+          provenance: false
+          tags: banc/java:${{ matrix.tag }}
+      - name: Contrôles de l'image (version, utilisateur, outils, démarrage façon Wings, Java4Shell, racines)
+        run: bash java/tests/controle-image.sh "banc/java:${{ matrix.tag }}" "${{ matrix.tag }}"
+      - name: Vrai démarrage Paper jusqu'à « Done », puis « stop » (options de conteneur de Wings)
+        timeout-minutes: 15
+        run: bash java/tests/demarrage-paper.sh "banc/java:${{ matrix.tag }}" "${{ matrix.tag }}"
+      - name: Connexions TLS de Java (chaîne Sectigo par AAA acceptée, chaînes eMudhra refusées)
+        timeout-minutes: 5
+        run: bash java/tests/racines-tls.sh "banc/java:${{ matrix.tag }}" "${{ matrix.tag }}"
+
+  publication:
+    name: "yolks:java_${{ matrix.tag }}"
+    # Jamais sur une pull request, jamais depuis une autre branche que main.
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        tag: ["8", "11", "16", "17", "21", "22", "25", "26", "21_graalvm", "25_graalvm"]
+    env:
+      IMAGE: ghcr.io/ouiheberg/yolks
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: v
+        name: Version de Java de la base
+        run: |
+          v=$(java/version.sh "${{ matrix.tag }}")
+          echo "$v"
+          echo "$v" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      # Construite et contrôlée AVANT la connexion au registre : c'est cette image-là,
+      # et pas une reconstruction, qui est poussée ensuite.
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ./java
+          file: ./java/${{ matrix.tag }}/Dockerfile
+          platforms: linux/amd64
+          pull: true
+          load: true
+          push: false
+          provenance: false
+          tags: |
+            ${{ env.IMAGE }}:java_${{ matrix.tag }}
+            ${{ env.IMAGE }}:java_${{ matrix.tag }}-${{ steps.v.outputs.courte }}
+      - name: Contrôles de l'image avant publication
+        run: bash java/tests/controle-image.sh "$IMAGE:java_${{ matrix.tag }}" "${{ matrix.tag }}"
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publication (étiquette versionnée, puis étiquette courante)
+        env:
+          COURTE: ${{ steps.v.outputs.courte }}
+        run: |
+          docker push "$IMAGE:java_${{ matrix.tag }}-$COURTE"
+          docker push "$IMAGE:java_${{ matrix.tag }}"
+      - name: Contrôle de l'image publiée, tirée sans identifiant comme sur les nœuds
+        env:
+          COURTE: ${{ steps.v.outputs.courte }}
+          ATTENDU: ${{ steps.v.outputs.attendu }}
+        run: |
+          set -euo pipefail
+          docker logout ghcr.io
+          docker image rm "$IMAGE:java_${{ matrix.tag }}" "$IMAGE:java_${{ matrix.tag }}-$COURTE"
+          for t in "java_${{ matrix.tag }}" "java_${{ matrix.tag }}-$COURTE"; do
+            docker pull "$IMAGE:$t"
+            sortie=$(docker run --rm --pull=never --entrypoint java "$IMAGE:$t" -version 2>&1)
+            echo "$sortie"
+            grep -qF -- "$ATTENDU" <<<"$sortie"
+          done
+          bash java/tests/controle-image.sh "$IMAGE:java_${{ matrix.tag }}" "${{ matrix.tag }}"
