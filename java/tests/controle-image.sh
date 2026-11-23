@@ -57,12 +57,13 @@ sortie=$(lancer -e STARTUP='java -version' "$image" 2>&1); code=$?
     && ok "docker run -e STARTUP='java -version' (code 0)" || { echo "$sortie" | sed 's/^/    /'; ko "démarrage STARTUP='java -version' (code $code)"; }
 
 # 5. Démarrage façon Wings : uid sans compte dans l'image, dossier du serveur monté (vide),
-#    variables {{…}} remplacées par l'entrypoint.
+#    variables {{…}} remplacées par l'entrypoint. La ligne affichée par l'entrypoint de l'amont
+#    garde « ${SERVER_MEMORY} » : la preuve du remplacement est la taille de tas de la JVM.
 vide=$(mktemp -d)
 sortie=$(lancer --user "$(id -u):$(id -g)" -v "$vide:/home/container" \
-    -e STARTUP='java -Xms128M -Xmx{{SERVER_MEMORY}}M -version' -e SERVER_MEMORY=1024 \
+    -e STARTUP='java -Xms128M -Xmx{{SERVER_MEMORY}}M -XX:+PrintFlagsFinal -version' -e SERVER_MEMORY=1024 \
     -e SERVER_IP=0.0.0.0 -e SERVER_PORT=25565 -e TZ=Europe/Paris "$image" 2>&1); code=$?
-if [ $code -eq 0 ] && grep -qF -- 'java -Xms128M -Xmx1024M -version' <<<"$sortie" && [ "$(grep -cF -- "$attendu" <<<"$sortie")" -ge 2 ]; then
+if [ $code -eq 0 ] && grep -qE 'MaxHeapSize +:?= 1073741824 ' <<<"$sortie" && [ "$(grep -cF -- "$attendu" <<<"$sortie")" -ge 2 ]; then
     ok "démarrage façon Wings (uid $(id -u), {{SERVER_MEMORY}} remplacé)"
 else
     echo "$sortie" | sed 's/^/    /'; ko "démarrage façon Wings (code $code)"

@@ -5,7 +5,7 @@
 # Usage : java/version.sh <dossier>      (8, 17, 21_graalvm…)
 # Sortie, au format de $GITHUB_OUTPUT :
 #   courte=21.0.13.1               étiquette versionnée : java_21-21.0.13.1
-#   attendu=(build 21.0.13.1+2)    texte que `java -version` doit afficher
+#   attendu=(build 21.0.13.1+2     texte que `java -version` doit afficher
 set -euo pipefail
 
 dossier="${1:?usage : version.sh <dossier de java/>}"
@@ -26,9 +26,10 @@ case "$image" in
             courte="8u${BASH_REMATCH[1]}"
             attendu="(build 1.8.0_${BASH_REMATCH[1]}-b${BASH_REMATCH[2]})"
         elif [[ $tag =~ ^([0-9]+(\.[0-9]+)*)_([0-9]+)-jdk- ]]; then
-            # 17.0.21.1_2-jdk-noble : « Temurin-17.0.21.1+2 (build 17.0.21.1+2) »
+            # 17.0.21.1_2-jdk-noble : « (build 17.0.21.1+2) », et « (build 21.0.13.1+2-LTS) »
+            # pour les LTS 21 et 25 : la parenthèse fermante n'est pas cherchée.
             courte="${BASH_REMATCH[1]}"
-            attendu="(build ${BASH_REMATCH[1]}+${BASH_REMATCH[3]})"
+            attendu="(build ${BASH_REMATCH[1]}+${BASH_REMATCH[3]}"
         fi
         ;;
     ghcr.io/graalvm/jdk-community:*)
